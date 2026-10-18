@@ -1,0 +1,1 @@
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*dubbing.worker*" -or $_.CommandLine -like "*start_worker.ps1*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "stopped $($_.ProcessId)" }

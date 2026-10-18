@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dubbing Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Dubbing Studio</div>
+  <select id="projectSelect" title="Open project"></select>
+  <button id="newBtn" class="ghost">+ New</button>
+  <div class="status" id="status"><span class="dot"></span><span id="statusText">—</span>
+    <div class="bar"><div id="statusBar"></div></div></div>
+  <div class="spacer"></div>
+  <span id="pending" class="pending" hidden></span>
+  <button id="applyBtn" class="primary" title="Re-run emotion/translation/voice for changed lines, then remix">Apply changes</button>
+  <div class="menu">
+    <button class="ghost" id="moreBtn">More ▾</button>
+    <div class="menu-items" id="moreMenu" hidden>
+      <label>Run from stage <select id="stageSelect"></select></label>
+      <label><input type="checkbox" id="fullRun"> redo all lines</label>
+      <button id="runStageBtn">Run</button>
+      <hr>
+      <label>Target language <select id="targetLang"></select></label>
+      <hr>
+      <a id="exVideo">Download dubbed video</a>
+      <a id="exAudio">Download dub audio (wav)</a>
+      <a id="exSrcSrt">Source subtitles (.srt)</a>
+      <a id="exTgtSrt">Translated subtitles (.srt)</a>
+      <a id="exProject">Project JSON</a>
+      <hr>
+      <button id="deleteBtn" class="danger">Delete project</button>
+    </div>
+  </div>
+</header>
+
+<main id="workspace" hidden>
+  <section class="player">
+    <video id="video" playsinline></video>
+    <audio id="dubAudio" preload="auto"></audio>
+    <div class="transport">
+      <button id="playBtn" title="Space">▶</button>
+      <span id="clock" class="mono">0:00.0</span>
+      <div class="seg-toggle" role="radiogroup" aria-label="Listen to">
+        <button data-mode="original" class="on">Original</button>
+        <button data-mode="dub">Dubbed</button>
+        <button data-mode="both">Both</button>
+      </div>
+      <label class="zoom">Zoom <input type="range" id="zoom" min="10" max="400" value="60"></label>
+    </div>
+  </section>
+
+  <aside class="speakers">
+    <h3>Speakers <button id="addSpeaker" class="ghost small">+ add</button></h3>
+    <div id="speakerList"></div>
+    <h3 class="gl-head" title="How each person's name is written in the dub. Approved names are used in every line that mentions them.">Names
+      <span><button id="suggestNames" class="ghost small" title="Draft names with the translation model; review each before approving">suggest</button>
+      <button id="approveNames" class="ghost small" hidden>approve all</button>
+      <button id="addName" class="ghost small">+ add</button></span></h3>
+    <div id="glossaryList"></div>
+  </aside>
+
+  <section class="timeline-wrap">
+    <canvas id="timeline"></canvas>
+  </section>
+
+  <section class="segments">
+    <div class="seg-tools">
+      <input id="search" type="search" placeholder="Search text or translation">
+      <select id="filterSpeaker"><option value="">All speakers</option></select>
+      <select id="filterFlag">
+        <option value="">All lines</option>
+        <option value="attention">Needs attention</option>
+        <option value="unreviewed">Not reviewed</option>
+        <option value="pending">Changed, not applied</option>
+        <option value="overflow">Dub too long</option>
+        <option value="lowconf">Low ASR confidence</option>
+        <option value="foreign">Other language</option>
+      </select>
+      <span id="segCount" class="muted"></span>
+      <span class="spacer"></span>
+      <span class="muted keys">Space play · J/K prev/next · Enter ✓ next · S split at playhead · M merge next</span>
+    </div>
+    <div id="segList" class="seg-list"></div>
+  </section>
+</main>
+
+<div id="empty" class="empty">
+  <p>Upload a video or paste a video link to start a dubbing project.</p>
+  <button class="primary" onclick="document.getElementById('newBtn').click()">New project</button>
+</div>
+
+<dialog id="newDialog">
+  <form id="newForm" method="dialog">
+    <h2>New dubbing project</h2>
+    <label>Video file <input type="file" name="video" id="newFile" accept="video/*,.mkv,.mov,.mxf"></label>
+    <label>…or a video link <input type="url" name="url" id="newUrl" placeholder="https://www.youtube.com/watch?v=…">
+      <small>YouTube and most video sites; downloaded at up to 1080p</small></label>
+    <label>Dub into <select name="target_lang" id="newTarget" required></select></label>
+    <label>Spoken language <select name="source_lang" id="newSource"><option value="">Auto-detect</option></select></label>
+    <label>Number of speakers <input type="number" name="num_speakers" min="0" max="50" value="0">
+      <small>0 = estimate automatically</small></label>
+    <label class="row"><input type="checkbox" name="pause" checked> Pause after transcription so I can fix speakers and text before voices are generated</label>
+    <div class="upload-progress" hidden><div></div></div>
+    <menu>
+      <button value="cancel" formnovalidate class="ghost">Cancel</button>
+      <button id="createBtn" class="primary" value="ok">Upload &amp; start</button>
+    </menu>
+  </form>
+</dialog>
+
+<template id="segTpl">
+  <div class="seg">
+    <div class="seg-head">
+      <span class="idx mono"></span>
+      <input class="t-start mono" size="8" title="Start (s)">
+      <span class="muted">→</span>
+      <input class="t-end mono" size="8" title="End (s)">
+      <select class="speaker"></select>
+      <select class="lang" title="Spoken language"></select>
+      <select class="emotion" title="Emotion"></select>
+      <span class="badges"></span>
+      <span class="spacer"></span>
+      <button class="b-orig small ghost" title="Play original">▶ orig</button>
+      <button class="b-dub small ghost" title="Play dub">▶ dub</button>
+      <button class="b-trans small ghost" title="Re-translate this line">⟳ translate</button>
+      <button class="b-synth small ghost" title="Regenerate voice for this line">⟳ voice</button>
+      <button class="b-split small ghost" title="Split at playhead (S)">✂</button>
+      <button class="b-merge small ghost" title="Merge with next (M)">⇣ merge</button>
+      <button class="b-del small ghost" title="Delete line">✕</button>
+      <label class="rev" title="Mark reviewed (Enter)"><input type="checkbox" class="reviewed"> ✓</label>
+    </div>
+    <div class="seg-body">
+      <textarea class="text" rows="2" spellcheck="false"></textarea>
+      <textarea class="translation" rows="2"></textarea>
+    </div>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -13,9 +13,12 @@ if [[ -n "$DUB_WORKER_URL" ]]; then
   pkill -f "ssh .*-L 8765:127.0.0.1:8765" 2>/dev/null || true
   # Keep the tunnel up across sleep / Wi-Fi drops: reconnect whenever ssh exits.
   (
+    set +e  # ssh exits non-zero whenever the tunnel drops; errexit would end this loop for good
     while true; do
       ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
           -N -L 8765:127.0.0.1:8765 -p "$GPU_PORT" "$GPU_HOST" 2>/dev/null
+      rc=$?
+      echo "$(date '+%F %T') worker tunnel closed (ssh exit $rc); reconnecting"
       sleep 3
     done
   ) &

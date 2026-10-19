@@ -34,6 +34,9 @@ The two talk through an SSH tunnel, so no firewall port has to be opened.
 ./run_studio.sh                            # opens tunnel, serves http://localhost:8000
 ```
 
+`start_worker.ps1` restarts the worker if it dies, and the studio waits for it and retries the interrupted
+request once. A native crash writes every thread's Python stack to `D:\dubbing-worker\worker_crash.log`.
+
 Video links are downloaded with yt-dlp in the studio's `.venv`. Sites change often, so if downloads start
 failing, update it: `uv pip install --python .venv/bin/python -U yt-dlp`.
 

@@ -26,6 +26,18 @@ def where(stage):
 
 
 # ---------------------------------------------------------------- http helpers
+def _wait_healthy(limit=180):
+    """Block until the worker answers /health again (it restarts itself after a crash)."""
+    end = time.time() + limit
+    while time.time() < end:
+        try:
+            with urllib.request.urlopen(WORKER_URL + "/health", timeout=5):
+                return True
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            time.sleep(3)
+    return False
+
+
 def _req(method, path, body=None, raw=None, timeout=7200):
     headers = {}
     if WORKER_TOKEN:
@@ -36,9 +48,17 @@ def _req(method, path, body=None, raw=None, timeout=7200):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(WORKER_URL + path, data=data, method=method, headers=headers)
     try:
+        retried = False
         for attempt in range(20):
             try:
                 return urllib.request.urlopen(req, timeout=timeout)
+            except ConnectionError as e:
+                # The worker died mid-request (seen once: a native crash in torch while loading a model). It
+                # restarts itself; every worker call is idempotent, so wait for it and retry once.
+                if retried or not _wait_healthy():
+                    raise RuntimeError(f"worker {path} failed: connection lost ({type(e).__name__})") from None
+                print(f"worker connection lost during {path}; worker is back, retrying", flush=True)
+                retried = True
             except urllib.error.URLError as e:
                 # Tunnel reconnecting or worker restarting: wait up to ~1 min before giving up.
                 if isinstance(e, urllib.error.HTTPError) or attempt == 19:

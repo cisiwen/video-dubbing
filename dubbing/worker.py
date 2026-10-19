@@ -4,6 +4,7 @@
 
 Files are content-addressed (sha256) so the orchestrator uploads each input only once.
 """
+import faulthandler
 import hashlib
 import os
 import tempfile
@@ -19,6 +20,11 @@ from . import engines
 CACHE = Path(os.environ.get("DUB_WORKER_CACHE", Path(tempfile.gettempdir()) / "dub-worker"))
 CACHE.mkdir(parents=True, exist_ok=True)
 TOKEN = os.environ.get("DUB_WORKER_TOKEN")
+
+# A native crash (access violation in torch, a driver fault) kills the process without a Python traceback;
+# faulthandler writes every thread's Python stack to this file first. start_worker.ps1 then restarts us.
+_crash_log = open(os.environ.get("DUB_WORKER_CRASH_LOG", "worker_crash.log"), "a", buffering=1)
+faulthandler.enable(file=_crash_log, all_threads=True)
 
 app = FastAPI(title="dubbing-worker")
 

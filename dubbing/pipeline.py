@@ -5,12 +5,13 @@ Stages run in order and each one is re-runnable. Human edits in the review UI fl
 unless `full=True`.
 """
 import queue
+import random
 import shutil
 import threading
 import time
 import traceback
 
-from . import audio, backend, config, glossary
+from . import audio, backend, config, fit, glossary
 from . import project as P
 
 # ---------------------------------------------------------------- job runner (one GPU, one job)
@@ -371,6 +372,7 @@ def emotion(pid, full):
 
 
 def translate(pid, full):
+    speaker_rates(pid)  # from lines voiced earlier, if any: sizes each speaker's length budget
     p = P.load(pid)
     tgt = p["target_lang"]
     todo = [s for s in p["segments"] if (full and not s.get("translation_locked"))
@@ -401,10 +403,54 @@ def translation_context(p, s):
     i = P.seg_index(p, s["id"])
     room = _room(p, s)
     return {"duration": round(s["end"] - s["start"], 2), "room": round(room, 2),
-            "budget": config.speech_budget(p["target_lang"], room), "emotion": s["emotion"],
+            "budget": config.speech_budget(p["target_lang"], room, _speaker_rate(p, s["speaker"])),
+            "emotion": s["emotion"],
             "prev": [x["text"] for x in p["segments"][max(0, i - 2):i]],
             "next": [x["text"] for x in p["segments"][i + 1:i + 2]],
             "names": glossary.names_in(p, s["text"])}
+
+
+def _speaker_rate(p, spk):
+    """This speaker's measured TTS pace in the project's target language, or None (use the default)."""
+    r = (p["speakers"].get(spk) or {}).get("speech_rate") or {}
+    return r.get("rate") if r.get("lang") == p["target_lang"] else None
+
+
+def speaker_rates(pid):
+    """Measure each speaker's natural TTS pace — spoken_units(translation) per second of voiced speech before
+    any tempo change — from their up-to-date voiced lines, and store it on project.speakers[*].speech_rate.
+    The mean of a line's takes is used, not the kept take (which best-of-N biases toward whatever fit).
+    Speakers with fewer than RATE_MIN_LINES lines get rate None (the language default applies)."""
+    p = P.load(pid)
+    tgt = p["target_lang"]
+    default = config.speech_rate(tgt)
+    acc: dict[str, list] = {}
+    for s in p["segments"]:
+        t = s.get("tts")
+        if not t or "tts" in s.get("needs", []) or t.get("text", s["translation"]) != s["translation"]:
+            continue
+        units = config.spoken_units(s["translation"])
+        durs = [c["duration"] for c in t.get("takes", []) if not c.get("capped")]
+        natural = sum(durs) / len(durs) if durs else t["duration"] * t["speed"]
+        # One-unit lines are mostly onset/offset; runaway or truncated takes say nothing about pace.
+        if units < 2 or not natural or not 0.5 <= units / natural / default <= 2:
+            continue
+        a = acc.setdefault(s["speaker"], [0, 0.0, 0])
+        a[0], a[1], a[2] = a[0] + units, a[1] + natural, a[2] + 1
+    rates = {}
+    for spk in p["speakers"]:
+        units, sec, n = acc.get(spk, (0, 0.0, 0))
+        rate = None
+        if n >= config.RATE_MIN_LINES:
+            rate = round((units + default * config.RATE_PRIOR_SEC) / (sec + config.RATE_PRIOR_SEC), 2)
+        rates[spk] = {"rate": rate, "lines": n, "seconds": round(sec, 1), "lang": tgt}
+
+    def f(p):
+        for spk, r in rates.items():
+            if spk in p["speakers"]:
+                p["speakers"][spk]["speech_rate"] = r
+    P.update(pid, f)
+    return rates
 
 
 def _room(p, s):
@@ -437,19 +483,23 @@ def _tts_item(d, p, s):
             "out": d / "tts" / f"{s['id']}_raw.wav", "max_tokens": max_tokens, **style}
 
 
-def _fit(pid, d, p, sid, raw, style, gen_sec):
-    """Trim and tempo-fit a generated line into its slot, then record it on the segment."""
+def _take_cfg(cfg, k):
+    """cfg_weight for take k: the line's own, then alternately lower / higher by TAKE_CFG_STEP, 2x, ..."""
+    if k == 0:
+        return cfg
+    step = config.TAKE_CFG_STEP * ((k + 1) // 2)
+    return round(min(1.0, max(0.05, cfg - step if k % 2 else cfg + step)), 3)
+
+
+def _fit(pid, d, p, sid, raw, dur, style, gen_sec, extra=None):
+    """Tempo-fit a generated, silence-trimmed line (`dur` s) into its slot, then record it on the segment."""
     i = P.seg_index(p, sid)
     s = p["segments"][i]
     seg_len = s["end"] - s["start"]
     out = d / "tts" / f"{sid}.wav"
-    dur = audio.trim_silence(raw)
     room = _room(p, s)
-    factor = 1.0
-    if dur > room:
-        factor = min(dur / room, config.MAX_SPEEDUP)
-    elif dur < seg_len * 0.8:
-        factor = max(dur / seg_len, config.MAX_SLOWDOWN)
+    factor = fit.tempo(dur, seg_len, room)
+    factor = min(factor, config.MAX_SPEEDUP) if factor > 1 else max(factor, config.MAX_SLOWDOWN)
     if abs(factor - 1) > 0.02:
         audio.stretch(raw, out, factor)
     else:
@@ -457,7 +507,7 @@ def _fit(pid, d, p, sid, raw, style, gen_sec):
     final = audio.duration(out)
     info = {"file": f"tts/{sid}.wav", "duration": round(final, 3), "speed": round(factor, 3),
             "overflow": round(max(0.0, final - room), 3), "style": style, "gen_sec": round(gen_sec, 2),
-            "made": time.time()}
+            "made": time.time(), "text": s["translation"], **(extra or {})}
 
     def f(p):
         seg = p["segments"][P.seg_index(p, sid)]
@@ -467,23 +517,60 @@ def _fit(pid, d, p, sid, raw, style, gen_sec):
     return info
 
 
-def _synth_batch(pid, sids):
+def _synth_batch(pid, sids, takes=None):
+    """Voice lines best-of-N: every line gets `takes` (default TTS_TAKES) candidates decoded in the same
+    batch, each with its own seed and a nudged cfg_weight; the one that best fits the slot is kept. The
+    worker picks by token count and vocodes only that take; the others' durations are estimates."""
+    takes = takes or config.TTS_TAKES
     d = P.pdir(pid)
     p = P.load(pid)
     segs = [p["segments"][P.seg_index(p, sid)] for sid in sids]
-    items = [_tts_item(d, p, s) for s in segs if s["translation"].strip()]
-    if not items:
+    lines = [_tts_item(d, p, s) for s in segs if s["translation"].strip()]
+    if not lines:
         return []
+    seed = random.randrange(2 ** 31 - 1000)
+    items = []
+    for n, ln in enumerate(lines):
+        s = p["segments"][P.seg_index(p, ln["id"])]
+        slot = [s["end"] - s["start"], _room(p, s)]
+        items += [{**ln, "seed": seed + n * takes + k, "cfg_weight": _take_cfg(ln["cfg_weight"], k),
+                   "group": ln["id"], "slot": slot, "out": d / "tts" / f"{ln['id']}_take{k}.wav"}
+                  for k in range(takes)]
+    for it in items:
+        it["out"].unlink(missing_ok=True)  # a leftover take must not pass for this run's
     t0 = time.time()
-    backend.tts_batch(items)
-    per_line = (time.time() - t0) / len(items)  # batch wall time shared across its lines
+    res = backend.tts_batch(items) or []
+    res = list(res) + [{}] * (len(items) - len(res))
+    per_line = (time.time() - t0) / len(lines)  # batch wall time shared across its lines
     p = P.load(pid)
-    styles = ("exaggeration", "cfg_weight")
-    return [_fit(pid, d, p, it["id"], it["out"], {k: it[k] for k in styles}, per_line) for it in items]
+    out = []
+    for n, ln in enumerate(lines):
+        s = p["segments"][P.seg_index(p, ln["id"])]
+        cands = []
+        for k in range(takes):
+            it, r = items[n * takes + k], res[n * takes + k]
+            c = {"take": k, "seed": it["seed"], "cfg_weight": it["cfg_weight"], "capped": r.get("capped", False)}
+            if r.get("vocoded", True) and it["out"].exists() and it["out"].stat().st_size:
+                c["duration"] = round(audio.trim_silence(it["out"]), 3)
+            else:
+                c.update(duration=r.get("est_duration", 0.0), est=True)
+            cands.append(c)
+        best = min((c for c in cands if not c.get("est")),
+                   key=lambda c: fit.take_score(c, s["end"] - s["start"], _room(p, s)))
+        for k in range(takes):
+            take_wav = items[n * takes + k]["out"]
+            if k == best["take"]:
+                take_wav.replace(ln["out"])
+            else:
+                take_wav.unlink(missing_ok=True)
+        style = {"exaggeration": ln["exaggeration"], "cfg_weight": best["cfg_weight"]}
+        extra = {"take": best["take"], "takes": cands} if takes > 1 else {"seed": best["seed"]}
+        out.append(_fit(pid, d, p, ln["id"], ln["out"], best["duration"], style, per_line, extra))
+    return out
 
 
 def synth_one(pid, sid):
-    """Voice-clone one segment (review UI's regenerate button)."""
+    """Voice-clone one segment, best-of-N (review UI's regenerate button)."""
     res = _synth_batch(pid, [sid])
     return res[0] if res else None
 
@@ -501,6 +588,10 @@ def synthesize(pid, full):
         _status(pid, "synthesize", k / max(1, len(todo)),
                 f"voices {k + 1}-{min(k + n, len(todo))}/{len(todo)}" + (f", ~{eta / 60:.0f} min left" if eta else ""))
         _synth_batch(pid, [s["id"] for s in todo[k:k + n]])
+    rates = speaker_rates(pid)
+    _log(pid, "speaker rates (units/s): " + ", ".join(
+        f"{p['speakers'][spk]['name']} {r['rate'] or '-'} ({r['lines']})" for spk, r in rates.items()
+        if spk in p["speakers"]))
     _shorten_overflows(pid, {s["id"] for s in todo})
 
 
@@ -541,7 +632,7 @@ def _shorten_overflows(pid, sids):
                 units = config.spoken_units(s["translation"])
                 natural = s["tts"]["duration"] * s["tts"]["speed"]
                 rate = max(units / natural if natural else 0,
-                           0.75 * config.SPEECH_RATE.get(tgt, config.DEFAULT_SPEECH_RATE))
+                           0.75 * (_speaker_rate(p, s["speaker"]) or config.speech_rate(tgt)))
                 fit = int(rate * ctx["room"] * config.MAX_SPEEDUP * 0.9)
                 ctx.update(budget=max(1, min(units - 1, fit)), attempt=s["translation"],
                            attempt_over=s["tts"]["overflow"])

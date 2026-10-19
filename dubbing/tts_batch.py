@@ -10,6 +10,7 @@ The per-line logic (CFG, alignment-based hallucination guard, repetition penalty
 follows `T3.inference` / `AlignmentStreamAnalyzer` from chatterbox-tts 0.1.7.
 """
 import logging
+import time
 
 import torch
 import torch.nn.functional as F
@@ -129,23 +130,102 @@ def _left_pad(seqs):
 
 @torch.inference_mode()
 def generate_batch(model, items, max_new_tokens=1000, repetition_penalty=2.0, min_p=0.05, top_p=1.0,
-                   cond_cache=None, debug=False, use_graph=True):
-    """items: [{text, language, ref, exaggeration, cfg_weight, temperature, max_tokens?}] -> 1-D numpy wavs.
-    use_graph: decode with the CUDA-graph static decoder (t3_graph.py) instead of HF LlamaModel."""
+                   cond_cache=None, debug=False, use_graph=True, stats=None):
+    """items: [{text, language, ref, exaggeration, cfg_weight, temperature, max_tokens?, seed?, group?, slot?}]
+    -> 1-D numpy wavs. A row with a seed samples from its own RNG, so a take is the same whatever it is batched
+    with (up to float noise). Takes of one line share a `group` and carry its `slot` [seg_len, room]: only the
+    take whose length (from its token count) best fits the slot is vocoded; the others get wav None.
+    use_graph: decode with the CUDA-graph static decoder (t3_graph.py) instead of HF LlamaModel.
+    stats: optional list, extended with {tokens, capped, est_duration} per item (capped = cut at max_tokens,
+    so speech is truncated; est_duration = trimmed length estimated from the token count)."""
     tfmr = model.t3.tfmr
     _install_spy_attention()
     saved_impl = tfmr.config._attn_implementation
     tfmr.config._attn_implementation = "spy_sdpa"
     try:
-        return _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, cond_cache, debug,
-                         use_graph)
+        toks, conds, st = [None] * len(items), [None] * len(items), [None] * len(items)
+        for idx in _kv_chunks(model, items, max_new_tokens, use_graph):
+            res = _generate(model, [items[i] for i in idx], max_new_tokens, repetition_penalty, min_p, top_p,
+                            cond_cache, debug, use_graph)
+            for i, (t, c, s) in zip(idx, zip(*res)):
+                toks[i], conds[i], st[i] = t, c, s
+        keep = _pick_takes(items, st)
+        t0 = time.perf_counter()
+        wavs = [_vocode(model, toks[i], conds[i]) if keep[i] else None for i in range(len(items))]
+        print(f"TTS vocoded {sum(keep)}/{len(items)} takes in {time.perf_counter() - t0:.1f}s", flush=True)
+        if stats is not None:
+            stats.extend(st)
+        return wavs
     finally:
         # Upstream ChatterboxMultilingualTTS.generate (our fallback) needs the original attention setting.
         tfmr.config._attn_implementation = saved_impl
 
 
-def _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, cond_cache, debug, use_graph):
+def _pick_takes(items, stats):
+    """Which items to vocode: every ungrouped item, and per group the take that best fits its slot."""
+    from .fit import TOKEN_SEC, TRIM_SEC, take_score
+    best = {}
+    for i, (it, st) in enumerate(zip(items, stats)):
+        st["est_duration"] = round(max(0.0, st["tokens"] * TOKEN_SEC - TRIM_SEC), 3)
+        if it.get("group") is None or not it.get("slot"):
+            continue
+        score = take_score({"duration": st["est_duration"], "capped": st["capped"]}, *it["slot"])
+        if it["group"] not in best or score < best[it["group"]][0]:
+            best[it["group"]] = (score, i)
+    chosen = {i for _, i in best.values()}
+    return [it.get("group") is None or not it.get("slot") or i in chosen for i, it in enumerate(items)]
+
+
+def _vocode(model, toks, cond):
     from chatterbox.models.s3tokenizer import SPEECH_VOCAB_SIZE
+    # Upstream runs drop_invalid_tokens, then keeps ids < 6561. Filtering alone does both (it is cut at the
+    # first EOS) and also drops any sampled special/unused id, which would crash S3Gen.
+    toks = toks[toks < SPEECH_VOCAB_SIZE].to(model.device)
+    if toks.numel() == 0:
+        return torch.zeros(int(model.sr * 0.1)).numpy()
+    wav, _ = model.s3gen.inference(speech_tokens=toks, ref_dict=cond.gen)
+    wav = wav.squeeze(0).detach().cpu().numpy()
+    return model.watermarker.apply_watermark(wav, sample_rate=model.sr)
+
+
+def _kv_chunks(model, items, max_new_tokens, use_graph):
+    """Split item indices into batches whose static KV cache fits DUB_TTS_KV_GB (Windows would silently spill
+    an oversized cache to system RAM and crawl). Items are packed greedily in order of decode budget, so
+    short lines share a large batch instead of being sized (and padded) for the longest line."""
+    if not (use_graph and torch.cuda.is_available() and str(model.device).startswith("cuda")) or len(items) < 2:
+        return [list(range(len(items)))]
+    from chatterbox.mtl_tts import punc_norm
+
+    cfgm = model.t3.tfmr.config
+    per_tok = cfgm.num_hidden_layers * 2 * 2 * cfgm.num_attention_heads * cfgm.head_dim * 4 / 1e9
+    lens = {}
+
+    def rows_len(i):
+        # Same L as _generate: conditioning (34 with the perceiver; +16 slack) + start/stop text tokens + BOS
+        # + text tokens (zh ≈ 4.5 per character) + decode budget, rounded up to 256.
+        if i not in lens:
+            it = items[i]
+            tt = model.tokenizer.text_to_tokens(punc_norm(it["text"]), language_id=it["language"].lower())
+            n_text = tt.shape[-1]
+            cap = min(max_new_tokens, int(it.get("max_tokens") or max_new_tokens))
+            lens[i] = -(-(50 + n_text + 3 + cap + 2) // 256) * 256
+        return lens[i]
+
+    chunks, cur, cur_len = [], [], 0
+    for i in sorted(range(len(items)), key=rows_len):
+        L = max(cur_len, rows_len(i))
+        if cur and (len(cur) + 1) * L * per_tok > KV_BUDGET_GB:
+            chunks.append(cur)
+            cur, L = [], rows_len(i)
+        cur.append(i)
+        cur_len = L
+    chunks.append(cur)
+    if len(chunks) > 1:
+        print(f"TTS batch of {len(items)} split into {[len(c) for c in chunks]} for the KV budget", flush=True)
+    return chunks
+
+
+def _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, cond_cache, debug, use_graph):
     from chatterbox.mtl_tts import punc_norm
 
     t3 = model.t3
@@ -183,6 +263,11 @@ def _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, co
     rep = RepetitionPenaltyLogitsProcessor(penalty=float(repetition_penalty))
     minp, topp = MinPLogitsWarper(min_p=min_p), TopPLogitsWarper(top_p=top_p)
     cond_rows = torch.arange(0, 2 * B, 2, device=dev)
+    gens = [None] * B
+    for b, it in enumerate(items):
+        if it.get("seed") is not None:
+            gens[b] = torch.Generator(device=dev)
+            gens[b].manual_seed(int(it["seed"]))
 
     caps = [min(max_new_tokens, int(it.get("max_tokens") or max_new_tokens)) for it in items]
     use_graph = use_graph and dev != "cpu" and torch.cuda.is_available() and str(dev).startswith("cuda")
@@ -194,11 +279,12 @@ def _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, co
         cfgm = tfmr.config
         kv_gb = cfgm.num_hidden_layers * 2 * 2 * B * cfgm.num_attention_heads * L * cfgm.head_dim * 4 / 1e9
         if kv_gb > KV_BUDGET_GB and B > 1:
-            # Too big for VRAM (Windows would silently spill to system RAM and crawl): split the batch.
+            # Backstop if _kv_chunks underestimated the prompt: split rather than spill out of VRAM.
             half = B // 2
             kw = dict(max_new_tokens=max_new_tokens, repetition_penalty=repetition_penalty, min_p=min_p,
                       top_p=top_p, cond_cache=cond_cache, debug=debug, use_graph=use_graph)
-            return (_generate(model, items[:half], **kw) + _generate(model, items[half:], **kw))
+            a, b = _generate(model, items[:half], **kw), _generate(model, items[half:], **kw)
+            return tuple(x + y for x, y in zip(a, b))
         st = getattr(model, "_static_t3", None)
         if st is None or (st.R, st.L) != (2 * B, L):
             model._static_t3 = None
@@ -235,10 +321,12 @@ def _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, co
         import time as _t
         debug = {"t": _t.perf_counter()}
     _spy["on"], _spy["attn"] = not use_graph, {}
+    t_dec = time.perf_counter()
     try:
         logits_rows, att_gpu = first_fwd()
         generated = torch.full((B, 1), t3.hp.start_speech_token, dtype=torch.long, device=dev)
         finished = torch.zeros(B, dtype=torch.bool)
+        capped = [False] * B
         lengths = [None] * B
         first = True
         for step in range(max(caps)):
@@ -264,7 +352,16 @@ def _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, co
 
             logits = rep(generated, logits) / temp
             logits = topp(generated, minp(generated, logits))
-            nxt = torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1)  # (B, 1)
+            probs = torch.softmax(logits, dim=-1)
+            if any(gens):
+                # Exponential race (argmax p/E, E~Exp(1)) == multinomial sampling, with per-row RNGs.
+                noise = torch.empty_like(probs).exponential_()
+                for b, g in enumerate(gens):
+                    if g is not None:
+                        noise[b].exponential_(generator=g)
+                nxt = (probs / noise).argmax(dim=-1, keepdim=True)
+            else:
+                nxt = torch.multinomial(probs, num_samples=1)  # (B, 1)
             generated = torch.cat([generated, nxt], dim=1)
             hit = (nxt[:, 0] == eos).cpu()
             for b in range(B):
@@ -272,6 +369,7 @@ def _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, co
                 if not finished[b] and (hit[b] or generated.shape[1] - 1 >= caps[b]):
                     finished[b] = True
                     lengths[b] = generated.shape[1]
+                    capped[b] = not hit[b]
             if finished.all():
                 break
             if debug and step % 50 == 0:
@@ -289,16 +387,9 @@ def _generate(model, items, max_new_tokens, repetition_penalty, min_p, top_p, co
     finally:
         _spy["on"], _spy["attn"] = False, {}
 
-    wavs = []
-    for b in range(B):
-        toks = generated[b, 1:lengths[b] or generated.shape[1]]
-        # Upstream runs drop_invalid_tokens, then keeps ids < 6561. Filtering alone does both (it is cut at
-        # the first EOS above) and also drops any sampled special/unused id, which would crash S3Gen.
-        toks = toks[toks < SPEECH_VOCAB_SIZE].to(dev)
-        if toks.numel() == 0:
-            wavs.append(torch.zeros(int(model.sr * 0.1)).numpy())
-            continue
-        wav, _ = model.s3gen.inference(speech_tokens=toks, ref_dict=conds[b].gen)
-        wav = wav.squeeze(0).detach().cpu().numpy()
-        wavs.append(model.watermarker.apply_watermark(wav, sample_rate=model.sr))
-    return wavs
+    toks = [generated[b, 1:lengths[b] or generated.shape[1]] for b in range(B)]
+    stats = [{"tokens": int(t.numel()), "capped": bool(capped[b] or lengths[b] is None)}
+             for b, t in enumerate(toks)]
+    print(f"TTS {B} takes: decoded {generated.shape[1] - 1} steps in {time.perf_counter() - t_dec:.1f}s",
+          flush=True)
+    return toks, conds, stats

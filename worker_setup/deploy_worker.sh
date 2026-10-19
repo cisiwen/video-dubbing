@@ -9,7 +9,7 @@ REMOTE=D:/dubbing-worker
 
 "${SSH[@]}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force D:\\dubbing-worker\\dubbing | Out-Null\""
 scp -q -P "$GPU_PORT" worker_setup/*.ps1 "$GPU_HOST:/$REMOTE/"
-scp -q -P "$GPU_PORT" dubbing/__init__.py dubbing/config.py dubbing/engines.py dubbing/tts_batch.py dubbing/t3_graph.py dubbing/worker.py "$GPU_HOST:/$REMOTE/dubbing/"
+scp -q -P "$GPU_PORT" dubbing/__init__.py dubbing/config.py dubbing/fit.py dubbing/engines.py dubbing/tts_batch.py dubbing/t3_graph.py dubbing/worker.py "$GPU_HOST:/$REMOTE/dubbing/"
 if [[ "${1:-}" == "--setup" ]]; then
   "${SSH[@]}" "powershell -NoProfile -ExecutionPolicy Bypass -File D:\\dubbing-worker\\setup.ps1"
 fi

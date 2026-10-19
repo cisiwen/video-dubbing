@@ -34,12 +34,20 @@ MAX_SPEEDUP = float(os.environ.get("DUB_MAX_SPEEDUP", 1.35))
 MAX_SLOWDOWN = float(os.environ.get("DUB_MAX_SLOWDOWN", 0.9))
 TTS_BATCH = int(os.environ.get("DUB_TTS_BATCH", 8))  # lines decoded together on the GPU
 TTS_IMPL = os.environ.get("DUB_TTS_IMPL", "batch")  # batch | stock (upstream one-line generate)
+# Best-of-N: voice each line N times in the same batch (different seed, cfg_weight nudged by ±TAKE_CFG_STEP)
+# and keep the take that fits its slot with the least tempo change.
+TTS_TAKES = max(1, int(os.environ.get("DUB_TTS_TAKES", 3)))
+TAKE_CFG_STEP = float(os.environ.get("DUB_TAKE_CFG_STEP", 0.1))
 MIN_REF_SEC = 3.0  # shortest clip usable as a voice-clone reference
 
 # Natural TTS speaking rate in spoken_units()/s, used to give the translator a length budget.
 # zh measured from Chatterbox output (median 4.0 over 35 lines); the rest are rough defaults.
 SPEECH_RATE = {"zh": 4.0, "ja": 6.0, "ko": 5.0}
 DEFAULT_SPEECH_RATE = 4.5  # syllables/s for alphabetic languages
+# Per-speaker rate measured from their voiced lines replaces the default once a speaker has this many lines;
+# it is shrunk toward the default by RATE_PRIOR_SEC seconds' worth of default-pace speech.
+RATE_MIN_LINES = int(os.environ.get("DUB_RATE_MIN_LINES", 3))
+RATE_PRIOR_SEC = float(os.environ.get("DUB_RATE_PRIOR_SEC", 5.0))
 BUDGET_SPEEDUP = float(os.environ.get("DUB_BUDGET_SPEEDUP", 1.1))  # tempo headroom assumed in budgets
 RETRY_OVERFLOW_SEC = float(os.environ.get("DUB_RETRY_OVERFLOW_SEC", 0.3))  # re-translate lines over this
 RETRY_ROUNDS = int(os.environ.get("DUB_RETRY_ROUNDS", 2))
@@ -91,9 +99,15 @@ def spoken_units(text: str) -> int:
     return n
 
 
-def speech_budget(lang: str, seconds: float) -> int:
-    """How many spoken_units() fit in `seconds` at natural pace plus a little tempo headroom."""
-    return max(1, int(SPEECH_RATE.get(lang, DEFAULT_SPEECH_RATE) * seconds * BUDGET_SPEEDUP))
+def speech_rate(lang: str) -> float:
+    """Default natural TTS pace for a language, in spoken_units()/s."""
+    return SPEECH_RATE.get(lang, DEFAULT_SPEECH_RATE)
+
+
+def speech_budget(lang: str, seconds: float, rate: float | None = None) -> int:
+    """How many spoken_units() fit in `seconds` at natural pace (`rate`, default: the language's) plus a
+    little tempo headroom."""
+    return max(1, int((rate or speech_rate(lang)) * seconds * BUDGET_SPEEDUP))
 
 
 def device() -> str:

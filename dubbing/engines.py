@@ -520,7 +520,10 @@ _cond_cache: "dict" = {}
 
 def tts_batch(items):
     """Generate several lines in one decode loop. items: [{text, language, ref, out, exaggeration,
-    cfg_weight, temperature}]; writes each `out` wav. Falls back to one-by-one on failure."""
+    cfg_weight, temperature, max_tokens?, seed?}]; writes each `out` wav and returns per-item info
+    (duration, and from the batched decoder: tokens, capped, est_duration, vocoded). Items sharing a `group`
+    with a `slot` are takes of one line: only the best-fitting one is vocoded and written. Falls back to
+    one-by-one on failure."""
     import torch
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
@@ -529,11 +532,13 @@ def tts_batch(items):
     model = _model("chatterbox", lambda: ChatterboxMultilingualTTS.from_pretrained(device=config.device()))
     if len(_cond_cache) > 256:
         _cond_cache.clear()
+    stats = []
     try:
         if config.TTS_IMPL != "batch":
             raise RuntimeError("stock TTS selected")
         with _lock:
-            wavs = generate_batch(model, [{"temperature": 0.8, **it} for it in items], cond_cache=_cond_cache)
+            wavs = generate_batch(model, [{"temperature": 0.8, **it} for it in items], cond_cache=_cond_cache,
+                                  stats=stats)
     except Exception as e:
         if config.TTS_IMPL == "batch":
             print(f"batched TTS failed ({type(e).__name__}: {e}); falling back to one line at a time", flush=True)
@@ -543,7 +548,10 @@ def tts_batch(items):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     out = []
-    for it, wav in zip(items, wavs):
+    for it, wav, st in zip(items, wavs, stats):
+        if wav is None:  # a losing take of a best-of-N group: decoded but not vocoded
+            out.append({"duration": None, "sample_rate": model.sr, "vocoded": False, **st})
+            continue
         sf.write(str(it["out"]), wav, model.sr)
-        out.append({"duration": len(wav) / model.sr, "sample_rate": model.sr})
+        out.append({"duration": len(wav) / model.sr, "sample_rate": model.sr, "vocoded": True, **st})
     return out

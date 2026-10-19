@@ -158,6 +158,9 @@ class TTSReq(BaseModel):
     cfg_weight: float = 0.5
     temperature: float = 0.8
     max_tokens: int | None = None  # decode budget (only used by /tts_batch)
+    seed: int | None = None  # per-line sampling seed (only used by /tts_batch)
+    group: str | None = None  # best-of-N: takes of one line share a group ...
+    slot: list[float] | None = None  # ... and its [seg_len, room]; only the best take is vocoded
 
 
 class TTSBatchReq(BaseModel):
@@ -169,7 +172,14 @@ def tts_batch(r: TTSBatchReq):
     outs = [_new_tmp() for _ in r.items]
     items = [{**it.model_dump(), "ref": _need(it.ref), "out": o} for it, o in zip(r.items, outs)]
     infos = engines.tts_batch(items)
-    return [{**info, "file": _store(o)} for info, o in zip(infos, outs)]
+    res = []
+    for info, o in zip(infos, outs):
+        if info.get("vocoded", True):
+            res.append({**info, "file": _store(o)})
+        else:
+            o.unlink(missing_ok=True)
+            res.append({**info, "file": None})
+    return res
 
 
 @app.post("/tts")

@@ -135,15 +135,19 @@ def suggest_names(texts, src, tgt, known=()):
 
 
 def tts_batch(items):
-    """items: [{text, language, ref (path), out (path), exaggeration, cfg_weight}] -> writes each out."""
+    """items: [{text, language, ref (path), out (path), exaggeration, cfg_weight, max_tokens?, seed?}]
+    -> writes each out; returns per-item info."""
     if not _remote("tts"):
         return _engines().tts_batch(items)
     keys = ("text", "language", "exaggeration", "cfg_weight")
     body = {"items": [{**{k: it[k] for k in keys}, "temperature": it.get("temperature", 0.8),
-                       "max_tokens": it.get("max_tokens"), "ref": _upload(it["ref"])} for it in items]}
+                       "max_tokens": it.get("max_tokens"), "seed": it.get("seed"), "group": it.get("group"),
+                       "slot": it.get("slot"),
+                       "ref": _upload(it["ref"])} for it in items]}
     res = _post("/tts_batch", body)
     for it, r in zip(items, res):
-        _download(r["file"], it["out"])
+        if r.get("file"):
+            _download(r["file"], it["out"])
     return res
 
 

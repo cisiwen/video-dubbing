@@ -16,8 +16,11 @@ video ─► extract ─► separate ─► transcribe ─► diarize ─► seg
 * **Voice clone**: by default each line uses its own original audio as the clone prompt, so the delivery
   carries over. The detected emotion sets Chatterbox's `exaggeration` and `cfg_weight`
   (see `EMOTION_STYLE` in `dubbing/config.py`). Lines shorter than 3 s use the speaker's reference clip.
-* **Timing**: dubbed lines are trimmed, then sped up (max ×1.35) or slowed down (min ×0.9) to fit the slot.
-  If a line is still too long, the UI flags it as "+Ns long".
+* **Timing**: each line is voiced 3 times in the same batch (different seed, `cfg_weight` nudged ±0.1) and the
+  take that fits its slot with the least tempo change is kept; it is then trimmed and sped up (max ×1.35) or
+  slowed down (min ×0.9) to fit. The translator's length budget uses each speaker's own measured speaking
+  rate (`speakers[*].speech_rate`, from their voiced lines). If a line is still too long, the UI flags it
+  as "+Ns long".
 * **Music & effects** are kept: the dub is mixed over the Demucs background stem.
 * **Output**: an MP4 with the dubbed track (default) and the original track, plus source and target `.srt` files.
 
@@ -43,6 +46,8 @@ Environment knobs (all optional):
 | `DUB_TRANSLATION_PROVIDER` | `llm` | `llm` = length-aware Qwen on the GPU worker (`DUB_LLM_MODEL`, default `unsloth/Qwen3-8B-bnb-4bit`, Apache-2.0); falls back to NLLB if it cannot load. `nllb` = NLLB-200 only. `ollama` = same prompt via Ollama (`DUB_OLLAMA_MODEL`) |
 | `DUB_RETRY_OVERFLOW_SEC` / `DUB_RETRY_ROUNDS` | `0.3` / `2` | after voicing, lines still longer than their slot by this much are re-translated shorter and re-voiced (LLM providers only); each line keeps its best attempt |
 | `DUB_MAX_SPEEDUP` / `DUB_MAX_SLOWDOWN` | 1.35 / 0.9 | timing-fit limits |
+| `DUB_TTS_TAKES` / `DUB_TAKE_CFG_STEP` | `3` / `0.1` | best-of-N takes per line (1 = off) and the `cfg_weight` nudge between takes |
+| `DUB_RATE_MIN_LINES` / `DUB_RATE_PRIOR_SEC` | `3` / `5` | a speaker's measured rate is used once they have this many voiced lines, shrunk toward the language default by this many seconds of default-pace speech |
 | `HF_TOKEN` | – | only needed to download the gated pyannote model on a new machine |
 
 ## Voice-generation speed
@@ -54,7 +59,12 @@ per line), and `dubbing/t3_graph.py` replays each step as one CUDA graph over a 
 (logits match HF within 1.5e-5). Measured on 16 lines of a real episode: 389 s → 56 s (RTF 2.9 → 0.44),
 Whisper round-trip CER unchanged (0.24 vs 0.23). Each line's decode budget is derived from its time slot, and a
 batch is split if its KV cache would exceed `DUB_TTS_KV_GB` (default 3 GB) so Windows never spills VRAM to
-system RAM. `DUB_TTS_IMPL=stock` switches back to upstream generation.
+system RAM (items are packed greedily by decode length). `DUB_TTS_IMPL=stock` switches back to upstream
+generation.
+
+Best-of-N takes are cheap because the worker picks the winning take from its token count (40 ms per token,
+minus ~0.07 s of trimmed silence) and only vocodes that one: S3Gen costs ~1.8 s per line, more than the
+batched decode. On the 6-min test episode, 3 takes cost about +25% synthesize wall time (two runs each: 299 s → 377 s on average).
 
 Benchmarks: `worker_setup/bench_compare.py` (speed), `worker_setup/cer_check.py` (accuracy),
 `worker_setup/test_graph.py` (graph-vs-HF parity), `worker_setup/prof_step.py` (per-step profile).

@@ -92,7 +92,11 @@ def _download(fid, dest):
 def health():
     if not WORKER_URL:
         return {"ok": True, "worker": None}
-    with _req("GET", "/health", timeout=10) as r:
+    # Direct call, no retry: _req waits up to 3 min for a restarting worker, which would hang the UI's page
+    # load whenever the worker is unreachable (e.g. the tunnel is down); the UI just shows it as offline.
+    headers = {"x-worker-token": WORKER_TOKEN} if WORKER_TOKEN else {}
+    req = urllib.request.Request(WORKER_URL + "/health", headers=headers)
+    with urllib.request.urlopen(req, timeout=5) as r:
         return {**json.loads(r.read()), "worker": WORKER_URL}
 
 

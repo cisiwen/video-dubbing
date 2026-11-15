@@ -2,8 +2,17 @@
 # Copy worker code to the Windows GPU box and (re)start it.  First time: also run setup.ps1 there.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-GPU_HOST="${GPU_HOST:-cisiwen@192.168.1.120}"
-GPU_PORT="${GPU_PORT:-2200}"
+# The GPU box on the home LAN, else over Tailscale (when away from home). Set GPU_HOST to force one.
+GPU_USER="${GPU_USER:-cisiwen}"
+GPU_ADDRS="${GPU_ADDRS:-192.168.1.120 100.115.157.50}"
+if [[ -z "${GPU_HOST:-}" ]]; then
+  for a in $GPU_ADDRS; do
+    if nc -z -G 3 "$a" "${GPU_PORT:-22}" 2>/dev/null; then GPU_HOST="$GPU_USER@$a"; break; fi
+  done
+  GPU_HOST="${GPU_HOST:-$GPU_USER@${GPU_ADDRS%% *}}"
+  echo "GPU worker host: $GPU_HOST"
+fi
+GPU_PORT="${GPU_PORT:-22}"
 SSH=(ssh -o BatchMode=yes -p "$GPU_PORT" "$GPU_HOST")
 REMOTE=D:/dubbing-worker
 

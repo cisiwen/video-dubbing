@@ -1,0 +1,12 @@
+# Mac orchestrator + review UI (models run on the GPU worker; see worker_setup/setup.ps1)
+#   uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -r requirements-studio.txt
+# Also needs ffmpeg/ffprobe on PATH (brew install ffmpeg).
+# Optional, to keep ASR on the Mac (DUB_LOCAL_STAGES=transcribe,detect_languages): mlx-whisper
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+numpy
+soundfile
+librosa
+yt-dlp[default]  # includes yt-dlp-ejs; YouTube also needs deno (brew install deno)

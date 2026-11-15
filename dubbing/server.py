@@ -1,4 +1,5 @@
 """Review UI + API server.  Run:  python -m uvicorn dubbing.server:app --port 8000"""
+import re
 import shutil
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import backend, config, glossary, pipeline
+from . import backend, captions, config, glossary, pipeline
 from . import project as P
 
 app = FastAPI(title="Video dubbing studio")
@@ -55,7 +56,8 @@ def projects():
 async def create_project(video: UploadFile | None = File(None), url: str = Form(""),
                          target_lang: str = Form(...),
                          source_lang: str = Form(""), num_speakers: int = Form(0),
-                         pause_after: str = Form("segment")):
+                         pause_after: str = Form("segment"), text_source: str = Form("auto"),
+                         caption_file: UploadFile | None = File(None)):
     """Either upload `video`, or pass a `url` (YouTube etc.) that the extract stage downloads with yt-dlp."""
     if target_lang not in config.TTS_LANGUAGES:
         raise HTTPException(400, f"unsupported target language {target_lang}")
@@ -66,8 +68,13 @@ async def create_project(video: UploadFile | None = File(None), url: str = Form(
         raise HTTPException(400, "choose a video file or paste a video link")
     elif not url.lower().startswith(("http://", "https://")):
         raise HTTPException(400, "the video link must start with http:// or https://")
+    if text_source not in ("auto", "captions", "asr"):
+        raise HTTPException(400, "text_source must be auto, captions or asr")
+    has_caption_file = bool(caption_file and caption_file.filename)
+    if has_caption_file and Path(caption_file.filename).suffix.lower() not in captions.CAPTION_EXTS:
+        raise HTTPException(400, "captions must be an .srt or .vtt file")
     settings = {"source_lang": source_lang or None, "num_speakers": num_speakers or None,
-                "pause_after": None if pause_after in ("", "none") else pause_after}
+                "pause_after": None if pause_after in ("", "none") else pause_after, "text_source": text_source}
     if url:
         p = P.create(url, ".mp4", target_lang, settings, source_url=url)  # renamed to the title once known
     else:
@@ -75,8 +82,35 @@ async def create_project(video: UploadFile | None = File(None), url: str = Form(
         p = P.create(Path(video.filename).stem, ext, target_lang, settings)
         with open(P.pdir(p["id"]) / p["source_video"], "wb") as f:
             shutil.copyfileobj(video.file, f, 1 << 22)
+    if has_caption_file:
+        p = _save_caption_file(p["id"], caption_file, source_lang or None)
     pipeline.enqueue(p["id"])
     return p
+
+
+def _save_caption_file(pid, f: UploadFile, lang):
+    """Store an uploaded .srt/.vtt as the spoken-language captions (lang None = whatever is spoken)."""
+    d = P.pdir(pid) / "captions"
+    d.mkdir(exist_ok=True)
+    path = d / f"upload{len(list(d.glob('upload*')))}{Path(f.filename).suffix.lower()}"
+    path.write_bytes(f.file.read())
+    if not captions.parse(path):
+        path.unlink()
+        raise HTTPException(400, "no caption lines found in that file (expected SRT or WebVTT)")
+    def g(p):
+        p["captions"] = [t for t in p.get("captions", []) if not (t["origin"] == "upload" and t.get("lang") == lang)]
+        p["captions"].insert(0, {"lang": lang, "file": f"captions/{path.name}", "origin": "upload"})
+        return p
+    return P.update(pid, g)
+
+
+@app.post("/api/projects/{pid}/captions")
+async def add_captions(pid: str, file: UploadFile = File(...), lang: str = Form("")):
+    """Add a caption file to an existing project; re-run from "transcribe" to use it."""
+    _busy(_get(pid))
+    if Path(file.filename or "").suffix.lower() not in captions.CAPTION_EXTS:
+        raise HTTPException(400, "captions must be an .srt or .vtt file")
+    return _save_caption_file(pid, file, lang or None)
 
 
 @app.get("/api/projects/{pid}")
@@ -272,6 +306,39 @@ def _word_cut(text, frac):
     return min(spaces, key=lambda i: abs(i - target)) if spaces else target
 
 
+_NO_SPACE = re.compile(r"[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]")
+
+
+def _join(parts):
+    """Join line texts the way the language writes them: no space between Chinese/Japanese text
+    (including full-width punctuation), one space otherwise."""
+    out = ""
+    for t in (x.strip() for x in parts):
+        if not t:
+            continue
+        cjk_edge = out and _NO_SPACE.match(out[-1]) and _NO_SPACE.match(t[0])
+        out += t if not out or cjk_edge else " " + t
+    return out
+
+
+@app.get("/api/projects/{pid}/segments/{sid}/captions")
+def segment_captions(pid: str, sid: str):
+    """Caption cues around one line from every caption track, offset-corrected, with the text each can
+    supply as this line's transcript or translation (the review UI's "find in caption")."""
+    p = _get(pid)
+    try:
+        s = p["segments"][P.seg_index(p, sid)]
+    except KeyError:
+        raise HTTPException(404, "line not found")
+    spoken = s["lang"] or p["source_lang"]
+    out = []
+    for t in p.get("captions") or []:
+        path = P.pdir(pid) / t["file"]
+        if path.exists():
+            out.append(captions.cue_matches(t, captions.load(path), s, spoken, p["target_lang"], p["segments"]))
+    return {"spoken": spoken, "target": p["target_lang"], "tracks": out}
+
+
 class MergeReq(BaseModel):
     ids: list[str]
 
@@ -284,8 +351,13 @@ def merge_segments(pid: str, r: MergeReq):
         if len(segs) < 2:
             raise HTTPException(400, "pick at least two segments")
         a = segs[0]
-        a.update(end=max(s["end"] for s in segs), text=" ".join(s["text"] for s in segs),
-                 translation=" ".join(s["translation"] for s in segs if s["translation"]),
+        # The merged line belongs to whoever speaks most of it, not to whichever part came first.
+        talk = {}
+        for s in segs:
+            talk[s["speaker"]] = talk.get(s["speaker"], 0) + s["end"] - s["start"]
+        speaker = max(talk, key=lambda k: (talk[k], k == a["speaker"]))
+        a.update(end=max(s["end"] for s in segs), speaker=speaker, text=_join([s["text"] for s in segs]),
+                 translation=_join([s["translation"] for s in segs if s["translation"]]),
                  tts=None, reviewed=False, translation_locked=False, needs=["emotion", "translate", "tts"])
         drop = {s["id"] for s in segs[1:]}
         p["segments"] = [s for s in p["segments"] if s["id"] not in drop]

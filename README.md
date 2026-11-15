@@ -21,6 +21,14 @@ video ─► extract ─► separate ─► transcribe ─► diarize ─► seg
   slowed down (min ×0.9) to fit. The translator's length budget uses each speaker's own measured speaking
   rate (`speakers[*].speech_rate`, from their voiced lines). If a line is still too long, the UI flags it
   as "+Ns long".
+* **Captions**: if the video has creator-made captions (a link's manual subtitle tracks, a text subtitle
+  stream inside an uploaded file, or an `.srt`/`.vtt` you upload), their wording replaces Whisper's —
+  names, terms and punctuation come out right — while timing still comes from Whisper's word timestamps
+  (`dubbing/captions.py` aligns the two word by word; words only Whisper heard are kept). Auto-generated
+  captions are never used. Lines tagged `CC ≠ audio` are where the two disagree. A track that matches less
+  than half of Whisper's words is ignored in the default "auto" mode. Captions in the dub language, when the
+  creator made them, are passed to the translator as a terminology reference. To add captions to an existing
+  project: `POST /api/projects/<id>/captions`, then re-run from "transcribe".
 * **Music & effects** are kept: the dub is mixed over the Demucs background stem.
 * **Output**: an MP4 with the dubbed track (default) and the original track, plus source and target `.srt` files.
 

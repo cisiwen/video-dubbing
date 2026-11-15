@@ -290,6 +290,10 @@ def _messages(text, src, tgt, ctx):
     if ctx.get("names"):
         user += ("\nNames in this line - write each exactly like this: "
                  + "; ".join(f"{a} = {b}" for a, b in ctx["names"]) + ".")
+    if ctx.get("reference"):
+        user += (f"\nThe video's own {tgt_name} subtitle for this moment (may cover more or less than this "
+                 f"line, and is not sized for dubbing): {ctx['reference']}\nFollow its terminology and "
+                 f"wording where it fits, but still obey the length limit.")
     if ctx.get("emotion"):
         user += f"\nTone: {ctx['emotion']}."
     if ctx.get("budget"):

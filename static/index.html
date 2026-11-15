@@ -63,6 +63,8 @@
   </aside>
 
   <section class="timeline-wrap">
+    <button id="tlToggle" class="tl-toggle" aria-expanded="true" title="Show or hide the speaker timeline (T)">
+      <span class="tri">▾</span> Speaker timeline</button>
     <canvas id="timeline"></canvas>
   </section>
 
@@ -78,10 +80,11 @@
         <option value="overflow">Dub too long</option>
         <option value="lowconf">Low ASR confidence</option>
         <option value="foreign">Other language</option>
+        <option value="ccdiff">Captions differ from audio</option>
       </select>
       <span id="segCount" class="muted"></span>
       <span class="spacer"></span>
-      <span class="muted keys">Space play · J/K prev/next · Enter ✓ next · S split at playhead · M merge next</span>
+      <span class="muted keys">Space play · J/K prev/next · Enter ✓ next · S split at playhead · M merge next · C find in caption · T timeline</span>
     </div>
     <div id="segList" class="seg-list"></div>
   </section>
@@ -100,6 +103,13 @@
       <small>YouTube and most video sites; downloaded at up to 1080p</small></label>
     <label>Dub into <select name="target_lang" id="newTarget" required></select></label>
     <label>Spoken language <select name="source_lang" id="newSource"><option value="">Auto-detect</option></select></label>
+    <label>Transcript text <select name="text_source">
+        <option value="auto" selected>Captions if the video has them, else speech recognition</option>
+        <option value="captions">Captions only (stop if there are none)</option>
+        <option value="asr">Speech recognition only</option></select>
+      <small>Only creator-made captions are used, never auto-generated ones. Timing always comes from the audio.</small></label>
+    <label>Caption file <input type="file" name="caption_file" accept=".srt,.vtt">
+      <small>Optional .srt/.vtt in the spoken language; links and video files with subtitle tracks are checked automatically</small></label>
     <label>Number of speakers <input type="number" name="num_speakers" min="0" max="50" value="0">
       <small>0 = estimate automatically</small></label>
     <label class="row"><input type="checkbox" name="pause" checked> Pause after transcription so I can fix speakers and text before voices are generated</label>
@@ -125,6 +135,7 @@
       <span class="spacer"></span>
       <button class="b-orig small ghost" title="Play original">▶ orig</button>
       <button class="b-dub small ghost" title="Play dub">▶ dub</button>
+      <button class="b-cc small ghost" title="Find this line in the video's captions (C)" hidden>find in caption</button>
       <button class="b-trans small ghost" title="Re-translate this line">⟳ translate</button>
       <button class="b-synth small ghost" title="Regenerate voice for this line">⟳ voice</button>
       <button class="b-split small ghost" title="Split at playhead (S)">✂</button>
@@ -136,6 +147,7 @@
       <textarea class="text" rows="2" spellcheck="false"></textarea>
       <textarea class="translation" rows="2"></textarea>
     </div>
+    <div class="cc-panel" hidden></div>
   </div>
 </template>
 

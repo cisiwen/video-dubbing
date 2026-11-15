@@ -11,7 +11,7 @@ import threading
 import time
 import traceback
 
-from . import audio, backend, config, fit, glossary
+from . import audio, backend, captions, config, fit, glossary
 from . import project as P
 
 # ---------------------------------------------------------------- job runner (one GPU, one job)
@@ -113,6 +113,7 @@ def download(pid, url):
             _log(pid, f"downloading {title or url} ({info.get('extractor_key')}, "
                       f"{info.get('height') or '?'}p, {info.get('duration') or '?'}s)")
             info = ydl.process_ie_result(info, download=True)
+            _link_captions(pid, info, ydl)
     except yt_dlp.utils.DownloadError as e:
         msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).removeprefix("ERROR: ").strip()
         raise RuntimeError(f"download failed: {msg}") from None
@@ -123,6 +124,51 @@ def download(pid, url):
     if not path:
         raise RuntimeError("download failed: yt-dlp produced no file")
     P.update(pid, lambda p: p.update(source_video=path.name))
+
+
+def _caption_langs(p, info=None):
+    """Base language codes worth fetching: the spoken language (setting, else the site's metadata) and the
+    dub language (a translation reference). None = spoken language unknown: fetch every manual track."""
+    spoken = captions.base_lang(p["settings"].get("source_lang") or (info or {}).get("language"))
+    return {spoken, captions.base_lang(p["target_lang"])} if spoken else None
+
+
+def _link_captions(pid, info, ydl):
+    """Save the video's creator-made captions (never auto-generated ones). Failures only log: captions are
+    an optional improvement and must not fail the download."""
+    p = P.load(pid)
+    if p["settings"].get("text_source") == "asr":
+        return P.update(pid, lambda p: p.update(captions_checked=True))
+    try:
+        tracks = captions.from_ytdlp(info, ydl, P.pdir(pid) / "captions", _caption_langs(p, info))
+    except Exception as e:
+        tracks = []
+        _log(pid, f"could not fetch captions: {type(e).__name__}: {e}")
+    auto = sorted((info.get("automatic_captions") or {}))
+    _log(pid, f"manual captions: {', '.join(t['lang'] for t in tracks)}" if tracks else
+         "no manual captions" + (" (auto-generated ones exist but are not used)" if auto else ""))
+    P.update(pid, lambda p: p.update(captions=p.get("captions", []) + tracks, captions_checked=True))
+
+
+def _find_captions(pid):
+    """Captions for a project whose video is already here: muxed text subtitles of an upload, or, for a
+    link downloaded before captions were supported, the site's manual tracks."""
+    p = P.load(pid)
+    if p["settings"].get("text_source") == "asr":
+        return P.update(pid, lambda p: p.update(captions_checked=True))
+    if p.get("source_url"):
+        import yt_dlp
+        try:
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True,
+                                   "skip_download": True, "socket_timeout": 30}) as ydl:
+                return _link_captions(pid, ydl.extract_info(p["source_url"], download=False), ydl)
+        except Exception as e:
+            _log(pid, f"could not look up captions: {type(e).__name__}: {e}")
+            return P.update(pid, lambda p: p.update(captions_checked=True))
+    tracks = captions.from_container(P.pdir(pid) / p["source_video"], P.pdir(pid) / "captions")
+    if tracks:
+        _log(pid, f"subtitles in the video file: {', '.join(t['lang'] or 'unknown language' for t in tracks)}")
+    P.update(pid, lambda p: p.update(captions=p.get("captions", []) + tracks, captions_checked=True))
 
 
 def extract(pid, full):
@@ -142,6 +188,8 @@ def extract(pid, full):
     _status(pid, "extract", base + (1 - base) * 0.5, "making browser preview")
     audio.make_preview(src, d / "preview.mp4")
     P.update(pid, lambda p: p.update(duration=info["duration"]))
+    if not P.load(pid).get("captions_checked"):
+        _find_captions(pid)
 
 
 def separate(pid, full):
@@ -153,9 +201,34 @@ def separate(pid, full):
 def transcribe(pid, full):
     d = P.pdir(pid)
     p = P.load(pid)
+    if not p.get("captions_checked"):  # project made before captions were supported
+        _find_captions(pid)
+        p = P.load(pid)
     res = backend.transcribe(d / "vocals16k.wav", p["settings"].get("source_lang"))
+    (d / "whisper.json").write_text(__import__("json").dumps(res, ensure_ascii=False))
+    res = _caption_text(pid, p, res)
     (d / "asr.json").write_text(__import__("json").dumps(res, ensure_ascii=False))
-    P.update(pid, lambda p: p.update(source_lang=res["language"]))
+    P.update(pid, lambda p: p.update(source_lang=res["language"], text_source=res.get("text_source", "asr"),
+                                     caption_match=res.get("caption_match")))
+
+
+def _caption_text(pid, p, res):
+    """Swap in the manual captions' wording (keeping Whisper's timing) per settings.text_source:
+    auto = when a track in the spoken language matches the audio; captions = always (error if none); asr = never."""
+    mode = p["settings"].get("text_source") or "auto"
+    if mode == "asr":
+        return res
+    track = captions.pick(p.get("captions") or [], res["language"])
+    if not track:
+        if mode == "captions":
+            raise RuntimeError(f"no manual captions in the spoken language ({res['language']}); "
+                               f"set the text source to auto or speech recognition")
+        return res
+    cues = captions.parse(P.pdir(pid) / track["file"])
+    new, st = captions.align(res, cues, require=mode == "captions")
+    _log(pid, f"captions {track['lang'] or track['origin']}: {st['match']:.0%} of Whisper's words match"
+              + ("" if st["used"] else " — too different from the audio, using Whisper's text"))
+    return new
 
 
 def diarize(pid, full):
@@ -200,7 +273,8 @@ def _merge_side(frag, prev, nxt, same_speaker):
 def _smooth_speakers(words):
     """Diarization flips the speaker for a word or two mid-phrase (turn edges land inside words).
     A run of <= 2 words under MERGE_FRAGMENT_SEC (between pauses) touching another speaker's words
-    takes that speaker."""
+    takes that speaker. So does a run of any length that has (almost) no duration: Whisper sometimes gives
+    a few CJK characters zero-length timestamps, and the speaker found for an instant is a guess."""
     runs = []
     for w in words:
         if (runs and runs[-1][-1]["speaker"] == w["speaker"]
@@ -209,7 +283,8 @@ def _smooth_speakers(words):
         else:
             runs.append([w])
     for i, run in enumerate(runs):
-        if len(run) > 2 or run[-1]["end"] - run[0]["start"] >= config.MERGE_FRAGMENT_SEC:
+        span = run[-1]["end"] - run[0]["start"]
+        if span >= config.MERGE_FRAGMENT_SEC or (len(run) > 2 and span >= INSTANT_SEC):
             continue
         prev, nxt = (runs[i - 1] if i else None), (runs[i + 1] if i + 1 < len(runs) else None)
         side = _merge_side(run, prev, nxt, same_speaker=False)
@@ -218,6 +293,9 @@ def _smooth_speakers(words):
             for w in run:
                 w["speaker"] = spk
     return words
+
+
+INSTANT_SEC = 0.15  # shorter than any line that can be voiced on its own
 
 
 def _merge_fragments(groups):
@@ -232,7 +310,8 @@ def _merge_fragments(groups):
             prev, nxt = (groups[i - 1] if i else None), (groups[i + 1] if i + 1 < len(groups) else None)
             fits_prev = prev and g[-1]["end"] - prev[0]["start"] <= config.MAX_SEGMENT_SEC * 1.6
             fits_next = nxt and nxt[-1]["end"] - g[0]["start"] <= config.MAX_SEGMENT_SEC * 1.6
-            side = _merge_side(g, prev if fits_prev else None, nxt if fits_next else None, same_speaker=True)
+            side = _merge_side(g, prev if fits_prev else None, nxt if fits_next else None,
+                               same_speaker=dur(g) >= INSTANT_SEC)  # an instant joins either speaker
             if side == "prev":
                 groups[i - 1] = prev + g
                 del groups[i]
@@ -262,6 +341,7 @@ def _group_words(asr, turns):
             dur = w["end"] - cur[0]["start"]
             end_sentence = _ends_sentence(prev)
             if (w["speaker"] != prev["speaker"] or w["start"] - prev["end"] > config.SPLIT_PAUSE_SEC
+                    or w.get("turn")  # the captions mark a new speaker here
                     or (dur > config.MAX_SEGMENT_SEC and end_sentence)
                     or dur > config.MAX_SEGMENT_SEC * 1.6):
                 groups.append(cur)
@@ -270,6 +350,16 @@ def _group_words(asr, turns):
     if cur:
         groups.append(cur)
     return _merge_fragments(groups)
+
+
+def _text_source(words):
+    """Where a line's text came from, and for caption text the share of words Whisper also heard."""
+    src = [w.get("src", "asr") for w in words]
+    cc = [x for x in src if x != "asr"]
+    if not cc:
+        return {"text_source": "asr", "caption_match": None}
+    return {"text_source": "captions" if len(cc) == len(src) else "mixed",
+            "caption_match": round(sum(x == "cc" for x in cc) / len(cc), 3)}
 
 
 def segment(pid, full):
@@ -287,6 +377,7 @@ def segment(pid, full):
                      "speaker": g[0]["speaker"], "lang": primary, "lang_prob": None,
                      "text": "".join(w["word"] for w in g).strip(),
                      "confidence": round(sum(w["prob"] for w in g) / len(g), 3),
+                     **_text_source(g),
                      "emotion": None, "emotion_score": None, "translation": "", "tts": None,
                      "reviewed": False, "needs": ["emotion", "translate", "tts"]})
 
@@ -303,7 +394,7 @@ def segment(pid, full):
             redo = backend.transcribe(clip, r["language"])
             text = " ".join(s["text"] for s in redo["segments"]).strip()
             if text:
-                segs[i]["text"] = text
+                segs[i].update(text=text, text_source="asr", caption_match=None)
 
     speakers = {}
     for n, spk in enumerate(sorted({s["speaker"] for s in segs})):
@@ -373,6 +464,8 @@ def emotion(pid, full):
 
 def translate(pid, full):
     speaker_rates(pid)  # from lines voiced earlier, if any: sizes each speaker's length budget
+    if not P.load(pid).get("captions_checked"):  # dub-language captions are a translation reference
+        _find_captions(pid)
     p = P.load(pid)
     tgt = p["target_lang"]
     todo = [s for s in p["segments"] if (full and not s.get("translation_locked"))
@@ -407,7 +500,23 @@ def translation_context(p, s):
             "emotion": s["emotion"],
             "prev": [x["text"] for x in p["segments"][max(0, i - 2):i]],
             "next": [x["text"] for x in p["segments"][i + 1:i + 2]],
-            "names": glossary.names_in(p, s["text"])}
+            "names": glossary.names_in(p, s["text"]),
+            "reference": _reference(p, s)}
+
+
+def _reference(p, s):
+    """The creator's own dub-language caption text for this line's time span, if they made one, with the
+    track's local offset corrected (caption files are often a few seconds off) and, for a two-language
+    track, only the dub-language words. Only a hint: subtitle translations are not sized for the slot."""
+    spoken = s["lang"] or p["source_lang"]
+    track = captions.pick([t for t in p.get("captions") or [] if t.get("lang")], p["target_lang"])
+    if not track or captions.base_lang(p["target_lang"]) == captions.base_lang(spoken):
+        return None
+    path = P.pdir(p["id"]) / track["file"]
+    if not path.exists():
+        return None
+    r = captions.cue_matches(track, captions.load(path), s, spoken, p["target_lang"], p["segments"], around=0)
+    return " ".join(c["as_translation"] for c in r["cues"] if c["match"] and c["as_translation"]) or None
 
 
 def _speaker_rate(p, spk):

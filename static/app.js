@@ -236,10 +236,15 @@ function badges(s, p) {
   if (s.tts?.overflow > 0.15) b.push(`<span class="badge bad" title="Dub runs past its slot even at max speed">+${s.tts.overflow.toFixed(1)}s long</span>`);
   if (s.tts && Math.abs(s.tts.speed - 1) > 0.02) b.push(`<span class="badge" title="Tempo change applied to fit">×${s.tts.speed}</span>`);
   if (s.confidence != null && s.confidence < 0.6) b.push(`<span class="badge warn" title="Low ASR confidence — check the text">ASR ${Math.round(s.confidence * 100)}%</span>`);
+  if (s.text_source && s.text_source !== "asr") b.push(ccDiff(s)
+    ? `<span class="badge warn" title="Caption text differs from what speech recognition heard (${Math.round(s.caption_match * 100)}% match) — check it against the audio">CC ≠ audio</span>`
+    : `<span class="badge info" title="Text from the video's captions${s.text_source === "mixed" ? " plus words only speech recognition heard" : ""}; timing from the audio">CC</span>`);
   if (s.lang && s.lang !== p.source_lang) b.push(`<span class="badge info" title="Different spoken language">${s.lang}</span>`);
   if (s.emotion_score != null && s.emotion_score < 0.5) b.push(`<span class="badge" title="Low emotion confidence">emo?</span>`);
   return b.join(" ");
 }
+
+const ccDiff = (s) => s.caption_match != null && s.caption_match < 0.6;
 
 function filtered(p) {
   const q = $("#search").value.toLowerCase(), spk = $("#filterSpeaker").value, flag = $("#filterFlag").value;
@@ -248,7 +253,8 @@ function filtered(p) {
     if (q && !(s.text + " " + s.translation).toLowerCase().includes(q)) return false;
     const over = s.tts?.overflow > 0.15, low = s.confidence < 0.6, foreign = s.lang && s.lang !== p.source_lang;
     switch (flag) {
-      case "attention": return over || low || foreign || s.needs?.length || (s.emotion_score ?? 1) < 0.5;
+      case "attention": return over || low || foreign || ccDiff(s) || s.needs?.length || (s.emotion_score ?? 1) < 0.5;
+      case "ccdiff": return ccDiff(s);
       case "unreviewed": return !s.reviewed;
       case "pending": return s.needs?.length;
       case "overflow": return over;
@@ -303,6 +309,7 @@ function makeRow(sid) {
     const s = seg(sid);
     if (s?.tts) playUrl(`/media/${state.pid}/${s.tts.file}?v=${s.tts.made}`);
   };
+  q(".b-cc").onclick = () => toggleCaptions(row);
   q(".b-split").onclick = () => splitAtPlayhead(sid);
   q(".b-merge").onclick = () => mergeNext(sid);
   q(".b-del").onclick = () => confirm("Delete this line?") &&
@@ -338,6 +345,68 @@ function fillRow(row, s, p, n) {
   q(".text").placeholder = `${p.source_lang || "source"} transcript`;
   q(".translation").placeholder = `${p.target_lang} translation`;
   q(".b-dub").disabled = !s.tts;
+  q(".b-cc").hidden = !p.captions?.length;
+}
+
+// ------------------------------------------------------------------ find in caption
+const CJK_RE = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef\uac00-\ud7af]/;
+function joinText(parts) {  // no space between Chinese/Japanese text, one space otherwise (as the server does)
+  return parts.map((t) => (t || "").trim()).filter(Boolean)
+    .reduce((out, t) => (!out ? t : CJK_RE.test(out.at(-1)) && CJK_RE.test(t[0]) ? out + t : `${out} ${t}`), "");
+}
+const fmtShift = (t) => (t.shift ? `captions ${t.shift > 0 ? "early" : "late"} by ${Math.abs(t.shift).toFixed(1)} s here, corrected` : "in sync");
+
+async function toggleCaptions(row) {
+  const panel = $(".cc-panel", row.el);
+  if (!panel.hidden) { panel.hidden = true; return; }
+  panel.hidden = false;
+  panel.innerHTML = `<div class="muted">Looking up captions…</div>`;
+  let r;
+  try { r = await api(`/api/projects/${state.pid}/segments/${row.sid}/captions`); }
+  catch (e) { panel.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  const s = seg(row.sid);
+  const tracks = r.tracks.filter((t) => t.cues.length);
+  if (!tracks.length) { panel.innerHTML = `<div class="muted">No caption lines near this line.</div>`; return; }
+  const lang = (l) => state.meta.languages[l?.split("-")[0]] || l || "unknown language";
+  panel.innerHTML = tracks.map((t, ti) => {
+    const roles = [t.cues.some((c) => c.as_text) && `transcript (${r.spoken})`, t.cues.some((c) => c.as_translation) && `translation (${r.target})`].filter(Boolean);
+    // pre-tick: cues inside the line's slot; for transcript-only tracks with no time match, the most similar cue
+    let pick = new Set(t.cues.filter((c) => c.match).map((c) => c.i));
+    if (!pick.size) { const best = t.cues.filter((c) => (c.sim ?? 0) >= 0.5).sort((a, b) => b.sim - a.sim)[0]; if (best) pick.add(best.i); }
+    return `<div class="cc-track" data-t="${ti}">
+      <div class="cc-head"><b>${esc(lang(t.lang))}</b> <span class="muted">${esc(t.origin)} · ${roles.length ? "can fill " + roles.join(" and ") : "different language, view only"} · ${fmtShift(t)}</span></div>
+      <div class="cc-cues">${t.cues.map((c) => `
+        <label class="cc-cue${c.match ? " in" : ""}">
+          <input type="checkbox" data-i="${c.i}" ${pick.has(c.i) ? "checked" : ""}>
+          <button class="cc-time mono small ghost" data-at="${c.start}" title="Play from here">${fmt(c.start)}</button>
+          <span class="cc-text">${esc(c.text)}</span>
+          ${c.sim != null ? `<span class="muted mono" title="Similarity to the current transcript">${Math.round(c.sim * 100)}%</span>` : ""}
+        </label>`).join("")}</div>
+      <div class="cc-actions">
+        ${t.cues.some((c) => c.as_text) ? `<button class="small" data-use="text">Use as transcript</button>` : ""}
+        ${t.cues.some((c) => c.as_translation) ? `<button class="small" data-use="translation">Use as translation</button>` : ""}
+        <span class="muted cc-hint">Tick the caption lines that belong to this line${s.tts ? "; the line is re-voiced on Apply" : ""}.</span>
+      </div></div>`;
+  }).join("") + `<div class="cc-actions"><span class="spacer"></span><button class="small ghost cc-close">Close</button></div>`;
+  panel.querySelectorAll(".cc-cues").forEach((list) => {  // start each list at its matched (ticked) cue
+    const hit = list.querySelector("input:checked")?.closest(".cc-cue");
+    if (hit) list.scrollTop = hit.offsetTop - list.offsetTop - 24;
+  });
+  $(".cc-close", panel).onclick = () => (panel.hidden = true);
+  panel.querySelectorAll(".cc-time").forEach((b) => (b.onclick = (e) => {
+    e.preventDefault(); seek(+b.dataset.at); video.play();
+  }));
+  panel.querySelectorAll(".cc-track").forEach((box) => {
+    const t = tracks[+box.dataset.t];
+    box.querySelectorAll("[data-use]").forEach((b) => (b.onclick = () => {
+      const field = b.dataset.use, key = field === "text" ? "as_text" : "as_translation";
+      const ticked = new Set([...box.querySelectorAll("input:checked")].map((x) => +x.dataset.i));
+      const value = joinText(t.cues.filter((c) => ticked.has(c.i)).map((c) => c[key]));
+      if (!value) return toast("Tick at least one caption line that has this text.");
+      act(() => api(`/api/projects/${state.pid}/segments/${row.sid}`, { method: "PATCH", body: { [field]: value } }), b)
+        .then((ok) => { if (!ok) return; panel.hidden = true; toast(field === "text" ? "Transcript replaced; press Apply to re-translate and re-voice." : "Translation set; press Apply to re-voice."); });
+    }));
+  });
 }
 
 const seg = (sid) => state.project.segments.find((s) => s.id === sid);
@@ -351,7 +420,8 @@ async function act(fn, btn) {
   try {
     await fn();
     applyProject(await api(`/api/projects/${state.pid}`), false);
-  } catch (e) { toast(e.message); }
+    return true;
+  } catch (e) { toast(e.message); return false; }
   finally { if (btn) btn.disabled = false; }
 }
 
@@ -587,6 +657,18 @@ timeline.addEventListener("wheel", (ev) => {
 $("#zoom").oninput = (e) => { state.pxPerSec = +e.target.value; drawTimeline(); };
 window.addEventListener("resize", drawTimeline);
 
+// ------------------------------------------------------------------ collapsible timeline
+function setTimelineOpen(open, remember = true) {
+  $(".timeline-wrap").classList.toggle("collapsed", !open);
+  $("#tlToggle").setAttribute("aria-expanded", open);
+  $("#tlToggle .tri").textContent = open ? "▾" : "▸";
+  if (remember) try { localStorage.setItem("timelineOpen", open ? "1" : "0"); } catch {}
+  fitList();  // the line list grows into the freed space (or gives it back)
+  if (open) drawTimeline();
+}
+$("#tlToggle").onclick = () => setTimelineOpen($(".timeline-wrap").classList.contains("collapsed"));
+try { if (localStorage.getItem("timelineOpen") === "0") setTimelineOpen(false, false); } catch {}
+
 // ------------------------------------------------------------------ controls
 $("#playBtn").onclick = () => (video.paused ? video.play() : video.pause());
 document.querySelectorAll(".seg-toggle button").forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
@@ -642,6 +724,8 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "m" && state.selected) mergeNext(state.selected);
   else if (e.key === "o" && state.selected) playSeg(seg(state.selected), "original");
   else if (e.key === "d" && state.selected) playSeg(seg(state.selected), "dub");
+  else if (e.key === "t") $("#tlToggle").click();
+  else if (e.key === "c" && state.selected && state.project.captions?.length) toggleCaptions(state.rows.get(state.selected));
 });
 function reviewNext() {
   if (!state.selected) return;
@@ -662,6 +746,7 @@ $("#newForm").addEventListener("submit", (e) => {
   const file = $("#newFile").files[0], url = f.get("url").trim();
   if (!file && !url) return toast("Choose a video file or paste a video link.");
   if (file) f.delete("url"); else f.delete("video");
+  if (!f.get("caption_file")?.name) f.delete("caption_file");
   f.set("pause_after", f.get("pause") ? "segment" : "none");
   f.delete("pause");
   const bar = $(".upload-progress"), btn = $("#createBtn");

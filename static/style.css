@@ -78,6 +78,11 @@ video { width: 100%; max-height: 34vh; background: #000; border-radius: 6px; }
 
 .timeline-wrap { grid-area: timeline; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--panel); }
 #timeline { width: 100%; height: 150px; display: block; cursor: crosshair; }
+.tl-toggle { display: flex; align-items: center; gap: 6px; width: 100%; border: 0; border-radius: 0; background: transparent;
+  padding: 3px 14px; font-size: 12px; color: var(--muted); text-align: left; }
+.tl-toggle:hover { color: var(--text); }
+.tl-toggle .tri { display: inline-block; width: 10px; }
+.timeline-wrap.collapsed #timeline { display: none; }
 
 .segments { grid-area: segments; display: flex; flex-direction: column; min-height: 0; }
 .seg-tools { display: flex; gap: 8px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); }
@@ -115,3 +120,12 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; ma
   .keys { display: none; }
   .status { min-width: 0; }
 }
+
+.cc-panel { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; gap: 10px; }
+.cc-head { margin-bottom: 4px; }
+.cc-cues { display: flex; flex-direction: column; max-height: 220px; overflow-y: auto; }
+.cc-cue { display: flex; align-items: baseline; gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+.cc-cue.in { background: var(--sel); }
+.cc-cue .cc-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.cc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.cc-hint { font-size: 12px; }

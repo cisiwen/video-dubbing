@@ -10,6 +10,7 @@ TRIM_SEC = 0.07  # median leading/trailing silence that trim_silence() removes f
 
 def tempo(dur, seg_len, room):
     """Tempo change (> 1 = faster) that would fit `dur` s of speech into the slot, before clamping."""
+    seg_len, room = max(seg_len, 0.05), max(room, 0.05)  # a zero-length line must not divide by zero
     if dur > room:
         return dur / room
     if dur < seg_len * 0.8:

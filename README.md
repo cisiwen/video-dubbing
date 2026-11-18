@@ -45,7 +45,14 @@ The two talk through an SSH tunnel, so no firewall port has to be opened.
 `start_worker.ps1` restarts the worker if it dies, and the studio waits for it and retries the interrupted
 request once. A native crash writes every thread's Python stack to `D:\dubbing-worker\worker_crash.log`.
 
-Video links are downloaded with yt-dlp in the studio's `.venv`. Sites change often, so if downloads start
+**From anywhere, without the Mac:** `./worker_setup/deploy_studio.sh --setup` installs the studio on the
+GPU box too (`D:\dubbing-studio`: its own small venv, a portable ffmpeg, projects in `D:\dubbing-studio\projects`)
+and registers boot tasks for it (`DubbingStudio`, 127.0.0.1:8000) and the worker (`DubbingWorker`). HomeLLM on that
+PC, run with `-app dubbing=http://127.0.0.1:8000`, then serves it at https://homellm.eiuoo.com/dubbing/ over its
+WebRTC connection (sign in and pair there first). Later deploys: `./worker_setup/deploy_studio.sh`. The page's
+static files are published by HomeLLM's web stack, so its API and media URLs are relative (`api/…`, `media/…`).
+
+ in the studio's `.venv`. Sites change often, so if downloads start
 failing, update it: `uv pip install --python .venv/bin/python -U yt-dlp`.
 
 Environment knobs (all optional):

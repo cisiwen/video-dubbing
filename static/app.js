@@ -29,7 +29,7 @@ const video = $("#video"), dub = $("#dubAudio");
 
 // ------------------------------------------------------------------ boot
 async function boot() {
-  state.meta = await api("/api/meta");
+  state.meta = await api("api/meta");
   const langs = Object.entries(state.meta.languages);
   for (const sel of [$("#newTarget"), $("#targetLang")])
     sel.innerHTML = langs.map(([c, n]) => `<option value="${c}">${n} (${c})</option>`).join("");
@@ -40,7 +40,7 @@ async function boot() {
 }
 
 async function refreshProjects(openId) {
-  const list = await api("/api/projects");
+  const list = await api("api/projects");
   $("#projectSelect").innerHTML = list.length
     ? list.map((p) => `<option value="${p.id}">${esc(p.name)} → ${p.target_lang} (${p.status.state})</option>`).join("")
     : `<option value="">No projects</option>`;
@@ -55,16 +55,16 @@ async function openProject(pid) {
   state.peaks = null;
   state.rows.clear();
   $("#segList").innerHTML = "";
-  const p = await api(`/api/projects/${pid}`);
+  const p = await api(`api/projects/${pid}`);
   $("#workspace").hidden = false; $("#empty").hidden = true;
-  video.src = `/media/${pid}/preview.mp4`;
+  video.src = `media/${pid}/preview.mp4`;
   loadDub(p);
   applyProject(p, true);
   poll();
 }
 
 function loadDub(p) {
-  dub.src = `/media/${p.id}/out/dub.wav?v=${p.updated}`;
+  dub.src = `media/${p.id}/out/dub.wav?v=${p.updated}`;
 }
 
 function poll() {
@@ -72,7 +72,7 @@ function poll() {
   state.polling = setInterval(async () => {
     if (!state.pid) return;
     try {
-      const p = await api(`/api/projects/${state.pid}`);
+      const p = await api(`api/projects/${state.pid}`);
       if (p.updated !== state.lastUpdated) applyProject(p, false);
     } catch {}
   }, 2000);
@@ -90,7 +90,7 @@ function applyProject(p, full) {
   const wasRunning = prev && ["running", "queued"].includes(prev.status.state);
   if (wasRunning && p.status.state === "done") loadDub(p);
   if (prev?.id === p.id && prev.stages.extract !== "done" && p.stages.extract === "done")
-    video.src = `/media/${p.id}/preview.mp4?v=${p.updated}`; // preview didn't exist when the project opened
+    video.src = `media/${p.id}/preview.mp4?v=${p.updated}`; // preview didn't exist when the project opened
   if (!state.peaks && p.stages.separate === "done") loadPeaks();
   renderSpeakers(p);
   renderGlossary(p);
@@ -157,13 +157,13 @@ function renderSpeakers(p) {
     $(".merge", el).onchange = async (e) => {
       const into = e.target.value;
       if (!into || !confirm(`Merge ${s.name} into ${p.speakers[into].name}? All their lines will be reassigned.`)) return (e.target.value = "");
-      await act(() => api(`/api/projects/${p.id}/speakers/merge`, { method: "POST", body: { source: s.id, into } }));
+      await act(() => api(`api/projects/${p.id}/speakers/merge`, { method: "POST", body: { source: s.id, into } }));
     };
     $(".set-ref", el).onclick = () => {
       if (!state.selected) return toast("Select a line first");
       patchSpeaker(s.id, { ref_segments: [state.selected] });
     };
-    $(".play-ref", el).onclick = () => playUrl(`/media/${p.id}/refs/${s.id}.wav?v=${p.updated}`);
+    $(".play-ref", el).onclick = () => playUrl(`media/${p.id}/refs/${s.id}.wav?v=${p.updated}`);
     box.appendChild(el);
   }
 }
@@ -204,7 +204,7 @@ const saveGlossary = async (entries) => {
   const rows = [...$("#glossaryList").children], cur = document.activeElement;
   const at = rows.findIndex((r) => r.contains(cur)), cls = cur?.className;
   cur?.blur();
-  await act(() => api(`/api/projects/${state.pid}/glossary`, { method: "PUT", body: { entries } }));
+  await act(() => api(`api/projects/${state.pid}/glossary`, { method: "PUT", body: { entries } }));
   if (at >= 0 && cls) $(`#glossaryList .gl:nth-child(${at + 1}) .${cls.split(" ")[0]}`)?.focus();
 };
 $("#addName").onclick = () => { // saved once the name is typed in
@@ -222,7 +222,7 @@ $("#suggestNames").onclick = async () => {
   const btn = $("#suggestNames");
   btn.textContent = "suggesting…";
   await act(async () => {
-    const r = await api(`/api/projects/${state.pid}/glossary/suggest`, { method: "POST" });
+    const r = await api(`api/projects/${state.pid}/glossary/suggest`, { method: "POST" });
     toast(r.added ? `${r.added} names suggested. Check each one (hover for the line it came from), fix it, then tick ✓.` : "No new names found.");
   }, btn);
   btn.textContent = "suggest";
@@ -288,7 +288,7 @@ function makeRow(sid) {
   const q = (c) => $(c, el);
   el.onclick = (e) => { if (!["TEXTAREA", "INPUT", "SELECT", "BUTTON"].includes(e.target.tagName)) select(sid, true); };
   el.addEventListener("focusin", () => select(sid, false));
-  const patch = (body) => act(() => api(`/api/projects/${state.pid}/segments/${sid}`, { method: "PATCH", body }));
+  const patch = (body) => act(() => api(`api/projects/${state.pid}/segments/${sid}`, { method: "PATCH", body }));
   q(".text").onchange = (e) => patch({ text: e.target.value });
   q(".translation").onchange = (e) => patch({ translation: e.target.value });
   q(".speaker").onchange = (e) => patch({ speaker: e.target.value });
@@ -301,19 +301,19 @@ function makeRow(sid) {
   q(".b-dub").onclick = () => {
     const s = seg(sid);
     if (!s.tts) return toast("No dub for this line yet");
-    playUrl(`/media/${state.pid}/${s.tts.file}?v=${s.tts.made}`);
+    playUrl(`media/${state.pid}/${s.tts.file}?v=${s.tts.made}`);
   };
-  q(".b-trans").onclick = () => act(() => api(`/api/projects/${state.pid}/segments/${sid}/retranslate`, { method: "POST" }), q(".b-trans"));
+  q(".b-trans").onclick = () => act(() => api(`api/projects/${state.pid}/segments/${sid}/retranslate`, { method: "POST" }), q(".b-trans"));
   q(".b-synth").onclick = async () => {
-    await act(() => api(`/api/projects/${state.pid}/segments/${sid}/synthesize`, { method: "POST" }), q(".b-synth"));
+    await act(() => api(`api/projects/${state.pid}/segments/${sid}/synthesize`, { method: "POST" }), q(".b-synth"));
     const s = seg(sid);
-    if (s?.tts) playUrl(`/media/${state.pid}/${s.tts.file}?v=${s.tts.made}`);
+    if (s?.tts) playUrl(`media/${state.pid}/${s.tts.file}?v=${s.tts.made}`);
   };
   q(".b-cc").onclick = () => toggleCaptions(row);
   q(".b-split").onclick = () => splitAtPlayhead(sid);
   q(".b-merge").onclick = () => mergeNext(sid);
   q(".b-del").onclick = () => confirm("Delete this line?") &&
-    act(() => api(`/api/projects/${state.pid}/segments/${sid}`, { method: "DELETE" }));
+    act(() => api(`api/projects/${state.pid}/segments/${sid}`, { method: "DELETE" }));
   return row;
 }
 
@@ -362,7 +362,7 @@ async function toggleCaptions(row) {
   panel.hidden = false;
   panel.innerHTML = `<div class="muted">Looking up captions…</div>`;
   let r;
-  try { r = await api(`/api/projects/${state.pid}/segments/${row.sid}/captions`); }
+  try { r = await api(`api/projects/${state.pid}/segments/${row.sid}/captions`); }
   catch (e) { panel.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
   const s = seg(row.sid);
   const tracks = r.tracks.filter((t) => t.cues.length);
@@ -403,7 +403,7 @@ async function toggleCaptions(row) {
       const ticked = new Set([...box.querySelectorAll("input:checked")].map((x) => +x.dataset.i));
       const value = joinText(t.cues.filter((c) => ticked.has(c.i)).map((c) => c[key]));
       if (!value) return toast("Tick at least one caption line that has this text.");
-      act(() => api(`/api/projects/${state.pid}/segments/${row.sid}`, { method: "PATCH", body: { [field]: value } }), b)
+      act(() => api(`api/projects/${state.pid}/segments/${row.sid}`, { method: "PATCH", body: { [field]: value } }), b)
         .then((ok) => { if (!ok) return; panel.hidden = true; toast(field === "text" ? "Transcript replaced; press Apply to re-translate and re-voice." : "Translation set; press Apply to re-voice."); });
     }));
   });
@@ -419,13 +419,13 @@ async function act(fn, btn) {
   if (btn) btn.disabled = true;
   try {
     await fn();
-    applyProject(await api(`/api/projects/${state.pid}`), false);
+    applyProject(await api(`api/projects/${state.pid}`), false);
     return true;
   } catch (e) { toast(e.message); return false; }
   finally { if (btn) btn.disabled = false; }
 }
 
-const patchSpeaker = (spk, body) => act(() => api(`/api/projects/${state.pid}/speakers/${spk}`, { method: "PATCH", body }));
+const patchSpeaker = (spk, body) => act(() => api(`api/projects/${state.pid}/speakers/${spk}`, { method: "PATCH", body }));
 
 // The line list fills the space left under the timeline (its height depends on the number of speakers),
 // but never less than 360px; on short windows the page scrolls to reach it.
@@ -464,12 +464,12 @@ function select(sid, scrollList) {
 function splitAtPlayhead(sid) {
   const s = seg(sid), t = video.currentTime;
   if (!(t > s.start + 0.1 && t < s.end - 0.1)) return toast("Move the playhead inside this line first (click the timeline)");
-  act(() => api(`/api/projects/${state.pid}/segments/${sid}/split`, { method: "POST", body: { at: t } }));
+  act(() => api(`api/projects/${state.pid}/segments/${sid}/split`, { method: "POST", body: { at: t } }));
 }
 function mergeNext(sid) {
   const segs = state.project.segments, i = segs.findIndex((s) => s.id === sid);
   if (i < 0 || i === segs.length - 1) return;
-  act(() => api(`/api/projects/${state.pid}/segments/merge`, { method: "POST", body: { ids: [sid, segs[i + 1].id] } }));
+  act(() => api(`api/projects/${state.pid}/segments/merge`, { method: "POST", body: { ids: [sid, segs[i + 1].id] } }));
 }
 
 // ------------------------------------------------------------------ playback
@@ -527,7 +527,7 @@ const timeline = $("#timeline");
 const LANE_H = 22, TOP = 18, WAVE_H = 34;
 
 async function loadPeaks() {
-  try { state.peaks = await api(`/api/projects/${state.pid}/peaks`); drawTimeline(); } catch {}
+  try { state.peaks = await api(`api/projects/${state.pid}/peaks`); drawTimeline(); } catch {}
 }
 function lanes() { return Object.keys(state.project?.speakers || {}); }
 function ensureVisible(s) {
@@ -640,7 +640,7 @@ window.addEventListener("mouseup", () => {
   if (!drag) return;
   const { s, kind, orig } = drag; drag = null;
   if (s[kind] !== orig)
-    act(() => api(`/api/projects/${state.pid}/segments/${s.id}`, { method: "PATCH", body: { [kind]: s[kind] } }));
+    act(() => api(`api/projects/${state.pid}/segments/${s.id}`, { method: "PATCH", body: { [kind]: s[kind] } }));
 });
 timeline.addEventListener("wheel", (ev) => {
   ev.preventDefault();
@@ -679,29 +679,29 @@ $("#filterFlag").onchange = () => renderSegments(state.project, false);
 $("#moreBtn").onclick = () => ($("#moreMenu").hidden = !$("#moreMenu").hidden);
 document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) $("#moreMenu").hidden = true; });
 
-$("#applyBtn").onclick = () => act(() => api(`/api/projects/${state.pid}/run`, { method: "POST", body: { from_stage: "emotion" } }));
+$("#applyBtn").onclick = () => act(() => api(`api/projects/${state.pid}/run`, { method: "POST", body: { from_stage: "emotion" } }));
 $("#runStageBtn").onclick = () => {
   const st = $("#stageSelect").value, full = $("#fullRun").checked;
   if (["extract", "separate", "transcribe", "diarize", "segment"].includes(st) &&
       !confirm(`Re-running "${st}" rebuilds all lines and discards your edits. Continue?`)) return;
-  act(() => api(`/api/projects/${state.pid}/run`, { method: "POST", body: { from_stage: st, full } }));
+  act(() => api(`api/projects/${state.pid}/run`, { method: "POST", body: { from_stage: st, full } }));
 };
 $("#targetLang").onchange = (e) => {
   if (!confirm("Change the dub language? All lines will be re-translated and re-voiced.")) return (e.target.value = state.project.target_lang);
-  act(() => api(`/api/projects/${state.pid}`, { method: "PATCH", body: { target_lang: e.target.value } }));
+  act(() => api(`api/projects/${state.pid}`, { method: "PATCH", body: { target_lang: e.target.value } }));
 };
 $("#deleteBtn").onclick = async () => {
   if (!confirm(`Delete project "${state.project.name}" and all its files?`)) return;
-  try { await api(`/api/projects/${state.pid}`, { method: "DELETE" }); state.pid = null; refreshProjects(); }
+  try { await api(`api/projects/${state.pid}`, { method: "DELETE" }); state.pid = null; refreshProjects(); }
   catch (e) { toast(e.message); }
 };
-$("#addSpeaker").onclick = () => act(() => api(`/api/projects/${state.pid}/speakers`, { method: "POST" }));
+$("#addSpeaker").onclick = () => act(() => api(`api/projects/${state.pid}/speakers`, { method: "POST" }));
 
 function updateExports(p) {
   const ready = p.stages.mix === "done";
   for (const [id, kind] of [["#exVideo", "video"], ["#exAudio", "audio"], ["#exSrcSrt", "srt_source"], ["#exTgtSrt", "srt_target"], ["#exProject", "project"]]) {
     const a = $(id);
-    a.href = `/api/projects/${p.id}/export/${kind}`;
+    a.href = `api/projects/${p.id}/export/${kind}`;
     a.classList.toggle("disabled", !ready && kind !== "project");
   }
 }
@@ -730,13 +730,14 @@ document.addEventListener("keydown", (e) => {
 function reviewNext() {
   if (!state.selected) return;
   const segs = filtered(state.project), i = segs.findIndex((s) => s.id === state.selected);
-  api(`/api/projects/${state.pid}/segments/${state.selected}`, { method: "PATCH", body: { reviewed: true } })
-    .then(async () => applyProject(await api(`/api/projects/${state.pid}`), false)).catch((e) => toast(e.message));
+  api(`api/projects/${state.pid}/segments/${state.selected}`, { method: "PATCH", body: { reviewed: true } })
+    .then(async () => applyProject(await api(`api/projects/${state.pid}`), false)).catch((e) => toast(e.message));
   if (segs[i + 1]) select(segs[i + 1].id, true);
 }
 
 // ------------------------------------------------------------------ new project
 $("#newBtn").onclick = () => $("#newDialog").showModal();
+$("#emptyNewBtn").onclick = () => $("#newDialog").showModal();
 $("#newFile").onchange = () => { if ($("#newFile").files.length) $("#newUrl").value = ""; };
 $("#newUrl").oninput = () => { if ($("#newUrl").value.trim()) $("#newFile").value = ""; };
 $("#newForm").addEventListener("submit", (e) => {
@@ -752,7 +753,7 @@ $("#newForm").addEventListener("submit", (e) => {
   const bar = $(".upload-progress"), btn = $("#createBtn");
   bar.hidden = false; btn.disabled = true;
   const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/projects");
+  xhr.open("POST", "api/projects");
   xhr.upload.onprogress = (ev) => ($("div", bar).style.width = `${(ev.loaded / ev.total) * 100}%`);
   xhr.onload = () => {
     btn.disabled = false; bar.hidden = true;

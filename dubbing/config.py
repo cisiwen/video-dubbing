@@ -11,13 +11,17 @@ WHISPER_MODEL = os.environ.get("DUB_WHISPER_MODEL", "mlx-community/whisper-large
 DIARIZATION_MODEL = os.environ.get("DUB_DIARIZATION_MODEL")  # default: community-1 on pyannote 4, else 3.1
 EMOTION_MODEL = os.environ.get("DUB_EMOTION_MODEL", "emotion2vec/emotion2vec_plus_large")
 # llm: length-aware Qwen on the GPU worker (falls back to nllb if it cannot load) | nllb | ollama
-TRANSLATION_PROVIDER = os.environ.get("DUB_TRANSLATION_PROVIDER", "llm")
+# A Mac running every model itself (no DUB_WORKER_URL) defaults to ollama: the 4-bit Qwen needs
+# bitsandbytes, which is CUDA-only, and Ollama runs well on Apple silicon.
+MAC_LOCAL = __import__("sys").platform == "darwin" and not os.environ.get("DUB_WORKER_URL")
+TRANSLATION_PROVIDER = os.environ.get("DUB_TRANSLATION_PROVIDER", "ollama" if MAC_LOCAL else "llm")
 # Apache-2.0 (commercial use OK). Pre-quantised 4-bit Qwen3-8B, ~8 GB peak; evicted before TTS loads.
 LLM_MODEL = os.environ.get("DUB_LLM_MODEL", "unsloth/Qwen3-8B-bnb-4bit")
 LLM_CACHE = os.environ.get("DUB_LLM_CACHE")  # HF cache dir for the LLM weights (default HF cache)
 NLLB_MODEL = os.environ.get("DUB_NLLB_MODEL", "facebook/nllb-200-distilled-600M")
 OLLAMA_URL = os.environ.get("DUB_OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("DUB_OLLAMA_MODEL", "qwen2.5:14b")
+# Empty: qwen2.5:14b if Ollama has it, else the first chat model it has (see engines.ollama_model).
+OLLAMA_MODEL = os.environ.get("DUB_OLLAMA_MODEL", "")
 DEMUCS_MODEL = os.environ.get("DUB_DEMUCS_MODEL", "htdemucs")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 

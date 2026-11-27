@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
-# Start the dubbing studio on this Mac, using the GPU worker on the Windows box through an SSH tunnel.
-#   ./run_studio.sh            -> http://localhost:8000
-# Set DUB_WORKER_URL= (empty) to run every model locally instead.
+# Start the dubbing studio on this Mac -> http://localhost:8000
+#   ./run_studio.sh            the models run on the GPU worker on the Windows box (SSH tunnel)
+#   ./run_studio.sh --local    every model runs on this Mac (set up with worker_setup/setup_mac.sh)
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [[ "${1:-}" == "--local" ]]; then
+  export DUB_WORKER_URL=
+  # Ops Metal lacks fall back to the CPU. The GPU shares main memory: cap Metal at the recommended
+  # working set so a job too big fails with out-of-memory instead of swapping the Mac to a standstill
+  # (the low watermark must not be above the high one).
+  export PYTORCH_ENABLE_MPS_FALLBACK=1 PYTORCH_MPS_HIGH_WATERMARK_RATIO=1.0 PYTORCH_MPS_LOW_WATERMARK_RATIO=0.8
+  export PYTHONUNBUFFERED=1
+  exec .venv/bin/python -m uvicorn dubbing.server:app --host 127.0.0.1 --port "${PORT:-8000}"
+fi
 
 # The GPU box on the home LAN, else over Tailscale (when away from home). Set GPU_HOST to force one.
 GPU_USER="${GPU_USER:-cisiwen}"

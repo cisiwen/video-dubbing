@@ -411,22 +411,12 @@ def _badness(out, budget, tgt, names=None):
 
 def _chat(prompts, max_new, provider=None):
     """Free-form completions (unlike translate(), keeps every output line)."""
-    import json
-    import urllib.request
     provider = provider or config.TRANSLATION_PROVIDER
     if provider == "llm":
         return _llm_generate(prompts, max_new, clean=False)
     if provider != "ollama":
         raise RuntimeError(f"name suggestions need an LLM translation provider, not {provider}")
-    out = []
-    for m in prompts:
-        req = urllib.request.Request(f"{config.OLLAMA_URL}/api/chat", method="POST",
-                                     data=json.dumps({"model": config.OLLAMA_MODEL, "stream": False, "messages": m,
-                                                      "options": {"temperature": 0}}).encode(),
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=300) as r:
-            out.append(json.loads(r.read())["message"]["content"].strip())
-    return out
+    return [_ollama_chat(m) for m in prompts]
 
 
 def suggest_names(texts, src, tgt, known=(), provider=None):
@@ -489,19 +479,50 @@ def suggest_names(texts, src, tgt, known=(), provider=None):
 
 def _translate_ollama(texts, src, tgt, context=None):
     """Same length-aware prompt, served by an Ollama instance."""
-    import json
-    import urllib.request
     out = []
     for i, text in enumerate(texts):
         ctx = (context or [None] * len(texts))[i] or {}
-        req = urllib.request.Request(f"{config.OLLAMA_URL}/api/chat", method="POST",
-                                     data=json.dumps({"model": config.OLLAMA_MODEL, "stream": False,
-                                                      "messages": _messages(text, src, tgt, ctx),
-                                                      "options": {"temperature": 0}}).encode(),
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=300) as r:
-            out.append(_clean(json.loads(r.read())["message"]["content"]))
+        out.append(_clean(_ollama_chat(_messages(text, src, tgt, ctx))))
     return out
+
+
+_ollama_name = None
+
+
+def ollama_model():
+    """DUB_OLLAMA_MODEL, else qwen2.5:14b if Ollama has it, else the first chat model it has."""
+    global _ollama_name
+    if config.OLLAMA_MODEL:
+        return config.OLLAMA_MODEL
+    if _ollama_name is None:
+        import json
+        import urllib.request
+        with urllib.request.urlopen(f"{config.OLLAMA_URL}/api/tags", timeout=10) as r:
+            names = [m["name"] for m in json.loads(r.read()).get("models", [])
+                     if "embed" not in m["name"].lower()]
+        if not names:
+            raise RuntimeError(f"Ollama at {config.OLLAMA_URL} has no models: ollama pull qwen2.5:14b")
+        _ollama_name = "qwen2.5:14b" if "qwen2.5:14b" in names else names[0]
+    return _ollama_name
+
+
+def _ollama_chat(messages):
+    """One non-streaming chat completion; thinking off (a thinking model would spend minutes per line)."""
+    import json
+    import urllib.error
+    import urllib.request
+    body = {"model": ollama_model(), "stream": False, "think": False, "messages": messages,
+            "options": {"temperature": 0}}
+    for attempt in (0, 1):
+        req = urllib.request.Request(f"{config.OLLAMA_URL}/api/chat", method="POST", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                return json.loads(r.read())["message"]["content"].strip()
+        except urllib.error.HTTPError as e:
+            if attempt or e.code != 400:
+                raise
+            body.pop("think")  # an older Ollama, or a model that rejects the option
 
 
 # ---------------------------------------------------------------- voice-cloned speech

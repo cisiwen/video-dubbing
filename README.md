@@ -42,6 +42,23 @@ The two talk through an SSH tunnel, so no firewall port has to be opened.
 ./run_studio.sh                            # opens tunnel, serves http://localhost:8000
 ```
 
+**Everything on the Mac (no GPU worker):** on Apple silicon the studio can run every model itself, on Metal:
+
+```bash
+./worker_setup/setup_mac.sh --service      # a copy that starts at login (launchd); re-run to update it
+./worker_setup/setup_mac.sh && ./run_studio.sh --local   # or run it from this checkout by hand
+```
+
+The service runs from `~/Library/Application Support/DubbingStudio` (macOS doesn't let background services
+read `~/Documents`), with its own `.venv` and `projects/`; its log is `~/Library/Logs/dubbing-studio.log`.
+
+Whisper runs on MLX (mlx-whisper), the others on PyTorch's Metal backend, and translation goes through
+Ollama (`DUB_TRANSLATION_PROVIDER` defaults to `ollama` here; `DUB_OLLAMA_MODEL` defaults to `qwen2.5:14b` if
+installed, else the first model Ollama has), because the 4-bit Qwen needs CUDA. The CUDA-graph voice decoder is
+NVIDIA-only too, so voicing is slower than on the RTX 5070. Speaker detection needs pyannote's gated model:
+accept its terms on Hugging Face and start the studio once with `HF_TOKEN` set. HomeLLM on the Mac, with
+`"app": ["dubbing=http://127.0.0.1:8000"]` in its `config.json`, serves it at https://homellm.eiuoo.com/dubbing/.
+
 `start_worker.ps1` restarts the worker if it dies, and the studio waits for it and retries the interrupted
 request once. A native crash writes every thread's Python stack to `D:\dubbing-worker\worker_crash.log`.
 
@@ -61,7 +78,7 @@ Environment knobs (all optional):
 |---|---|---|
 | `DUB_WORKER_URL` | `http://127.0.0.1:8765` | empty = run every model on this machine |
 | `DUB_LOCAL_STAGES` | – | e.g. `transcribe,detect_languages` keeps ASR on the Mac (mlx-whisper) |
-| `DUB_TRANSLATION_PROVIDER` | `llm` | `llm` = length-aware Qwen on the GPU worker (`DUB_LLM_MODEL`, default `unsloth/Qwen3-8B-bnb-4bit`, Apache-2.0); falls back to NLLB if it cannot load. `nllb` = NLLB-200 only. `ollama` = same prompt via Ollama (`DUB_OLLAMA_MODEL`) |
+| `DUB_TRANSLATION_PROVIDER` | `llm` (`ollama` with `--local` on a Mac) | `llm` = length-aware Qwen on the GPU worker (`DUB_LLM_MODEL`, default `unsloth/Qwen3-8B-bnb-4bit`, Apache-2.0); falls back to NLLB if it cannot load. `nllb` = NLLB-200 only. `ollama` = same prompt via Ollama (`DUB_OLLAMA_MODEL`) |
 | `DUB_RETRY_OVERFLOW_SEC` / `DUB_RETRY_ROUNDS` | `0.3` / `2` | after voicing, lines still longer than their slot by this much are re-translated shorter and re-voiced (LLM providers only); each line keeps its best attempt |
 | `DUB_MAX_SPEEDUP` / `DUB_MAX_SLOWDOWN` | 1.35 / 0.9 | timing-fit limits |
 | `DUB_TTS_TAKES` / `DUB_TAKE_CFG_STEP` | `3` / `0.1` | best-of-N takes per line (1 = off) and the `cfg_weight` nudge between takes |

@@ -22,6 +22,12 @@ NLLB_MODEL = os.environ.get("DUB_NLLB_MODEL", "facebook/nllb-200-distilled-600M"
 OLLAMA_URL = os.environ.get("DUB_OLLAMA_URL", "http://localhost:11434")
 # Empty: qwen2.5:14b if Ollama has it, else the first chat model it has (see engines.ollama_model).
 OLLAMA_MODEL = os.environ.get("DUB_OLLAMA_MODEL", "")
+# How long Ollama keeps the translation model loaded after a request (Ollama's own default: 5 min).
+OLLAMA_KEEP_ALIVE = os.environ.get("DUB_OLLAMA_KEEP_ALIVE", "1m" if MAC_LOCAL else "")
+# Unload every model after this many idle seconds (0 = keep the last one loaded). On a Mac the GPU
+# shares main memory with everything else - HomeLLM's chat, ComfyUI - and a voiced line leaves the
+# process holding ~17 GB; kept, that starves the next app's model and can freeze the machine.
+IDLE_RELEASE_SEC = float(os.environ.get("DUB_IDLE_RELEASE_SEC", 60 if MAC_LOCAL else 0))
 DEMUCS_MODEL = os.environ.get("DUB_DEMUCS_MODEL", "htdemucs")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 

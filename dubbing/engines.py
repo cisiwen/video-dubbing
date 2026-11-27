@@ -15,10 +15,13 @@ from . import config
 
 _lock = threading.RLock()
 _resident: dict = {}
+_last_use = 0.0
+_idle_thread = None
 
 
 def _model(name, loader):
     with _lock:
+        _touch()
         if name not in _resident:
             for other in list(_resident):
                 del _resident[other]
@@ -26,6 +29,52 @@ def _model(name, loader):
             _empty_cache()
             _resident[name] = loader()
         return _resident[name]
+
+
+def _touch():
+    """Note that a model is in use, and start the idle-release watcher if it's wanted."""
+    global _last_use, _idle_thread
+    import time
+    _last_use = time.monotonic()
+    if config.IDLE_RELEASE_SEC > 0 and _idle_thread is None:
+        _idle_thread = threading.Thread(target=_release_when_idle, name="idle-release", daemon=True)
+        _idle_thread.start()
+
+
+def _release_when_idle():
+    import time
+    while True:
+        time.sleep(min(15.0, config.IDLE_RELEASE_SEC))
+        if time.monotonic() - _last_use >= config.IDLE_RELEASE_SEC and _holding():
+            # _lock is held for the whole of every model call, so this waits for one in progress.
+            with _lock:
+                if time.monotonic() - _last_use >= config.IDLE_RELEASE_SEC:
+                    release()
+                    print(f"models unloaded after {config.IDLE_RELEASE_SEC:.0f} s idle", flush=True)
+
+
+def _holding():
+    if _resident or _cond_cache:
+        return True
+    mw = sys.modules.get("mlx_whisper.transcribe")
+    return bool(mw and mw.ModelHolder.model is not None)
+
+
+def release():
+    """Unload every model and hand the memory back (torch's and MLX's caches too)."""
+    with _lock:
+        _resident.clear()
+        _cond_cache.clear()
+        mw = sys.modules.get("mlx_whisper.transcribe")
+        if mw:
+            mw.ModelHolder.model = mw.ModelHolder.model_path = None
+        gc.collect()
+        _empty_cache()
+        if "mlx.core" in sys.modules:
+            try:
+                sys.modules["mlx.core"].clear_cache()
+            except Exception:
+                pass
 
 
 def _empty_cache():
@@ -92,6 +141,7 @@ def transcribe(audio_path, language=None):
     if _use_mlx():
         import mlx_whisper
         with _lock:
+            _touch()
             res = mlx_whisper.transcribe(audio, path_or_hf_repo=config.WHISPER_MODEL, language=language,
                                          word_timestamps=True, condition_on_previous_text=False)
         segs = [{"start": s["start"], "end": s["end"], "text": s["text"].strip(),
@@ -513,6 +563,8 @@ def _ollama_chat(messages):
     import urllib.request
     body = {"model": ollama_model(), "stream": False, "think": False, "messages": messages,
             "options": {"temperature": 0}}
+    if config.OLLAMA_KEEP_ALIVE:
+        body["keep_alive"] = config.OLLAMA_KEEP_ALIVE
     for attempt in (0, 1):
         req = urllib.request.Request(f"{config.OLLAMA_URL}/api/chat", method="POST", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
